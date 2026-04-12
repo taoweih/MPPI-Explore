@@ -289,11 +289,10 @@ class SeniorThesisBenchmarkSuite:
         ]
         env = os.environ.copy()
         # Give each worker its own Warp kernel cache to avoid compilation races.
-        worker_cache = os.path.join(
-            tempfile.gettempdir(),
-            f"warp_cache_{os.getpid()}_{ctrl_idx}_{gpu_id}",
+        cache_key = os.path.splitext(os.path.basename(output_path))[0]
+        env["WARP_CACHE_PATH"] = os.path.join(
+            tempfile.gettempdir(), f"warp_cache_{cache_key}",
         )
-        env["WARP_CACHE_PATH"] = worker_cache
         if self.config.num_gpus > 1:
             # Respect parent's CUDA_VISIBLE_DEVICES if set.
             parent_devs = os.environ.get("CUDA_VISIBLE_DEVICES", None)
