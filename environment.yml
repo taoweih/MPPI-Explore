@@ -1,0 +1,17 @@
+name: mjwarp
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pytorch=2.9.*=gpu_cuda128*
+  - scipy
+  - matplotlib
+  - tqdm
+  - pillow
+  - pip
+  - pip:
+    - mujoco==3.6.0
+    - mujoco-warp==3.6.0
+    - warp-lang==1.12.0
+    - glfw
+    - pyopengl
