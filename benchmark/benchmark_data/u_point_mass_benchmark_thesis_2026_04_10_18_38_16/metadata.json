@@ -1,0 +1,110 @@
+{
+  "task_name": "u_point_mass",
+  "controller_names": [
+    "MPPI",
+    "MPPI Density",
+    "MPPI Memory",
+    "MPPI Density + Memory"
+  ],
+  "config": {
+    "horizons": [
+      0.2,
+      0.65,
+      1.1,
+      1.55,
+      2.0
+    ],
+    "num_samples_list": [
+      64,
+      128,
+      256,
+      512,
+      1024,
+      2048
+    ],
+    "sweep_horizon_for_samples": 1.5,
+    "num_trials": 20,
+    "frequency": 50.0,
+    "goal_threshold": 0.4,
+    "max_iterations": 1000,
+    "record_video": false,
+    "video_trial_index": 0,
+    "output_tag": "thesis",
+    "pretrain_weights_dir": "/home/taowei/Documents/mppi_research/mppi_mjwarp/benchmark/senior_thesis_benchmarks/saved_pretrain_weights",
+    "controller_params": {
+      "shared": {
+        "noise_level": 3.0,
+        "temperature": 0.001,
+        "num_knots": 16,
+        "num_samples_default": 512
+      },
+      "staged": {
+        "num_knots_per_stage": 4,
+        "kde_bandwidth": 0.15
+      },
+      "memory": {
+        "memory_grid_min": -1.0,
+        "memory_grid_max": 1.0,
+        "online_learning_rate": 0.001,
+        "online_update_epochs": 1,
+        "online_batch_size": 1,
+        "online_anchor_samples": 0,
+        "online_new_state_weight": 10.0,
+        "goal_value": 0.0,
+        "goal_weight": 2000.0
+      },
+      "pretraining": {
+        "pretrain_sample_count": 100000,
+        "pretrain_epochs": 100,
+        "pretrain_batch_size": 512,
+        "pretrain_learning_rate": 0.001,
+        "pretrain_target_scale": 1.0
+      }
+    }
+  },
+  "horizons": [
+    0.20000000298023224,
+    0.6499999761581421,
+    1.100000023841858,
+    1.5499999523162842,
+    2.0
+  ],
+  "num_samples_list": [
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048
+  ],
+  "controller_params": {
+    "shared": {
+      "noise_level": 3.0,
+      "temperature": 0.001,
+      "num_knots": 16,
+      "num_samples_default": 512
+    },
+    "staged": {
+      "num_knots_per_stage": 4,
+      "kde_bandwidth": 0.15
+    },
+    "memory": {
+      "memory_grid_min": -1.0,
+      "memory_grid_max": 1.0,
+      "online_learning_rate": 0.001,
+      "online_update_epochs": 1,
+      "online_batch_size": 1,
+      "online_anchor_samples": 0,
+      "online_new_state_weight": 10.0,
+      "goal_value": 0.0,
+      "goal_weight": 2000.0
+    },
+    "pretraining": {
+      "pretrain_sample_count": 100000,
+      "pretrain_epochs": 100,
+      "pretrain_batch_size": 512,
+      "pretrain_learning_rate": 0.001,
+      "pretrain_target_scale": 1.0
+    }
+  }
+}

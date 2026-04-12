@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+CLAUDE.md
+.claude/
+
+# Recordings
+recordings/
+
+# OS
+.DS_Store

@@ -1,0 +1,28 @@
+{
+  "task_name": "u_point_mass",
+  "controller_names": [
+    "MPPI"
+  ],
+  "config": {
+    "horizons": [
+      0.5
+    ],
+    "num_samples_list": null,
+    "sweep_horizon_for_samples": 0.2,
+    "num_trials": 2,
+    "frequency": 50.0,
+    "goal_threshold": 0.4,
+    "max_iterations": 50,
+    "record_video": false,
+    "video_trial_index": 0,
+    "output_tag": "gpu_test",
+    "pretrain_weights_dir": null,
+    "controller_params": null,
+    "parallel": "all",
+    "max_workers": 1,
+    "num_gpus": 1
+  },
+  "horizons": [
+    0.5
+  ]
+}

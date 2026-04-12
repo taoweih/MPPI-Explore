@@ -1,0 +1,247 @@
+"""Ant locomotion example using mujoco_warp MPPI."""
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import matplotlib.patches as patches
+import mujoco
+import numpy as np
+
+from algs import (
+    MPPI,
+    MPPIStagedRollout,
+    MPPIMemoryContinuous,
+    MemoryPretrainConfig,
+)
+from simulation.deterministic import run_interactive
+from tasks.ant import Ant
+from utils.visualize_memory import visualize_memory
+
+WEIGHTS_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "benchmark"
+    / "senior_thesis_benchmarks"
+    / "saved_pretrain_weights"
+)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "controller",
+        nargs="?",
+        default="mppi",
+        choices=("mppi", "staged", "memory", "memory_staged"),
+    )
+    args = parser.parse_args()
+
+    # ── Shared MPPI parameters ──────────────────────────────────────────
+    num_samples = 1024
+    noise_level = 0.3
+    temperature = 0.00001
+    plan_horizon = 0.5
+    spline_type = "zero"
+    num_knots = 16
+    iterations = 1
+    seed = 0
+
+    # ── Staged rollout parameters ───────────────────────────────────────
+    num_knots_per_stage = 4
+    kde_bandwidth = 0.10
+    inverse_density_power = 0.5
+    state_dim = 2
+    state_source_field = "qpos"
+
+    # ── Memory parameters ───────────────────────────────────────────────
+    memory_grid_min = -10.0
+    memory_grid_max = 10.0
+    hashgrid_num_levels = 8
+    hashgrid_table_size = 4096
+    hashgrid_min_resolution = 40.0
+    hashgrid_max_resolution = 80.0
+    online_learning_rate = 1e-3
+    online_update_epochs = 1
+    online_batch_size = 2
+    online_anchor_samples = 0
+    online_new_state_weight = 1.0
+    goal_value = 0.0
+    goal_weight = 2000.0
+    weights_key = "ant_memory"
+    pretrain_mode = "load"  # "load" or "train"
+
+    # ── Pretraining parameters ──────────────────────────────────────────
+    pretrain_sample_count = 100000
+    pretrain_epochs = 101
+    pretrain_batch_size = 512
+    pretrain_learning_rate = 1e-2
+    pretrain_print_every = 50
+    pretrain_target_scale = 1.0
+
+    # ── Visualization parameters ───────────────────────────────────────
+    visualize = True
+    visualize_every = 500
+
+    # ── Simulation parameters ───────────────────────────────────────────
+    frequency = 50.0
+    max_steps = 5001
+    show_traces = True
+    record_video = False
+
+    # ── Task setup ──────────────────────────────────────────────────────
+    task = Ant()
+    mj_model = task.mj_model
+    mj_model.opt.timestep = task.sim_dt
+    mj_data = mujoco.MjData(mj_model)
+    mujoco.mj_forward(mj_model, mj_data)
+
+    # Goal position (needed for memory variants)
+    _tmp_data = mujoco.MjData(task.mj_model)
+    mujoco.mj_forward(task.mj_model, _tmp_data)
+    goal_xy = np.asarray(_tmp_data.xpos[task.goal_pos_id, :2], dtype=np.float32)
+
+    # ── Build controller ────────────────────────────────────────────────
+    shared = dict(
+        task=task,
+        num_samples=num_samples,
+        noise_level=noise_level,
+        temperature=temperature,
+        plan_horizon=plan_horizon,
+        spline_type=spline_type,
+        num_knots=num_knots,
+        iterations=iterations,
+        seed=seed,
+    )
+
+    if args.controller == "staged":
+        controller = MPPIStagedRollout(
+            **shared,
+            num_knots_per_stage=num_knots_per_stage,
+            kde_bandwidth=kde_bandwidth,
+            inverse_density_power=inverse_density_power,
+            state_dim=state_dim,
+            state_source_field=state_source_field,
+        )
+
+    elif args.controller in ("memory", "memory_staged"):
+        use_staged = args.controller == "memory_staged"
+        controller = MPPIMemoryContinuous(
+            **shared,
+            state_dim=state_dim,
+            state_source_field=state_source_field,
+            memory_grid_min=memory_grid_min,
+            memory_grid_max=memory_grid_max,
+            hashgrid_num_levels=hashgrid_num_levels,
+            hashgrid_table_size=hashgrid_table_size,
+            hashgrid_min_resolution=hashgrid_min_resolution,
+            hashgrid_max_resolution=hashgrid_max_resolution,
+            online_learning_rate=online_learning_rate,
+            online_update_epochs=online_update_epochs,
+            online_batch_size=online_batch_size,
+            online_anchor_samples=online_anchor_samples,
+            online_new_state_weight=online_new_state_weight,
+            goal_state=goal_xy[None, :],
+            goal_value=goal_value,
+            goal_weight=goal_weight,
+            use_staged_rollout=use_staged,
+            num_knots_per_stage=num_knots_per_stage,
+            kde_bandwidth=kde_bandwidth,
+            inverse_density_power=inverse_density_power,
+        )
+
+        def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
+            return rng.uniform(memory_grid_min, memory_grid_max, size=(n, state_dim)).astype(np.float32)
+
+        def target_function(states: np.ndarray) -> np.ndarray:
+            diff = states - goal_xy[None, :]
+            return pretrain_target_scale * np.sqrt(np.sum(diff * diff, axis=1)).astype(np.float32)
+
+        controller.configure_pretraining(
+            state_sampler=state_sampler,
+            target_function=target_function,
+            config=MemoryPretrainConfig(
+                sample_count=pretrain_sample_count,
+                epochs=pretrain_epochs,
+                batch_size=pretrain_batch_size,
+                learning_rate=pretrain_learning_rate,
+                print_every=pretrain_print_every,
+            ),
+        )
+        controller.pretrained_weights_key = weights_key
+
+        WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+        weights_path = WEIGHTS_DIR / f"{weights_key}.pt"
+
+        if pretrain_mode == "load":
+            if not weights_path.exists():
+                raise FileNotFoundError(
+                    f"Pretrained weights not found at {weights_path}. "
+                    "Run with --pretrain-mode train to generate them."
+                )
+            controller.load_pretrained_weights(weights_path)
+            print(f"Loaded pretrained memory weights from {weights_path}")
+        else:  # train
+            if weights_path.exists():
+                print(
+                    f"WARNING: Pretrained weights already exist at {weights_path}. "
+                    "Training from scratch — existing file will NOT be overwritten. "
+                    "Delete it manually to save new weights."
+                )
+            if not controller.pretrain_memory(verbose=True):
+                raise RuntimeError("Memory pretraining callbacks were not configured.")
+            if not weights_path.exists():
+                controller.save_pretrained_weights(weights_path)
+                print(f"Saved pretrained memory weights to {weights_path}")
+
+    else:  # mppi
+        controller = MPPI(**shared)
+
+    # ── Memory visualization setup ─────────────────────────────────────
+    vis_fn = None
+    if visualize and args.controller in ("memory", "memory_staged"):
+        vis_dir = Path(__file__).resolve().parents[1] / "visualize" / "ant"
+
+        def _plot_overlay(ax):
+            # Capsule obstacles from scene.xml (radius=0.3)
+            obstacle_positions = [
+                (0, 2), (2, 0), (3, 4), (2, 6),
+                (1, 3), (6, 1), (4, 3), (2, 5),
+            ]
+            for ox, oy in obstacle_positions:
+                ax.add_patch(patches.Circle(
+                    (ox, oy), 0.4,
+                    edgecolor="black", facecolor="gray", alpha=0.8,
+                ))
+            # Goal
+            ax.plot(goal_xy[0], goal_xy[1], "ro", markersize=8, label="Goal")
+
+        def _vis_fn(ctrl, step):
+            visualize_memory(
+                ctrl, step,
+                output_dir=vis_dir,
+                plot_overlay=_plot_overlay,
+                vmin=0, vmax=10,
+                xlim=(-1, 8),
+                ylim=(-1, 8),
+            )
+
+        vis_fn = _vis_fn
+
+    # ── Run ─────────────────────────────────────────────────────────────
+    run_interactive(
+        controller=controller,
+        mj_model=mj_model,
+        mj_data=mj_data,
+        frequency=frequency,
+        show_traces=show_traces,
+        record_video=record_video,
+        max_steps=max_steps,
+        visualize_fn=vis_fn,
+        visualize_every=visualize_every,
+    )
+
+
+if __name__ == "__main__":
+    main()
