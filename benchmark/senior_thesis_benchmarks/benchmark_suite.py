@@ -190,6 +190,7 @@ class SeniorThesisBenchmarkSuite:
         self.task_factory = task_factory
         self.controller_specs = list(controller_specs)
         self.config = config
+        self._warm_cache_dir: Optional[str] = None
 
     def run(self) -> Path:
         # Subprocess worker mode — run a single benchmark point and exit.
@@ -250,6 +251,8 @@ class SeniorThesisBenchmarkSuite:
         parser.add_argument("--axis-name", type=str, required=True)
         parser.add_argument("--sweep-horizon", type=float, default=0.0)
         parser.add_argument("--output", type=str, required=True)
+        parser.add_argument("--num-trials", type=int, default=None)
+        parser.add_argument("--max-iterations", type=int, default=None)
         args, _ = parser.parse_known_args()
 
         spec = self.controller_specs[args.ctrl_idx]
@@ -261,8 +264,17 @@ class SeniorThesisBenchmarkSuite:
                 _sample_controller_factory, horizon=args.sweep_horizon,
             )
 
+        # Allow overrides for warm-up runs.
+        orig_trials, orig_iters = self.config.num_trials, self.config.max_iterations
+        if args.num_trials is not None:
+            self.config.num_trials = args.num_trials
+        if args.max_iterations is not None:
+            self.config.max_iterations = args.max_iterations
+
         result = self._run_single_point(spec, args.axis_value, controller_factory)
         _save_benchmark_result(result, args.output)
+
+        self.config.num_trials, self.config.max_iterations = orig_trials, orig_iters
 
     def _launch_subprocess(
         self,
@@ -288,11 +300,14 @@ class SeniorThesisBenchmarkSuite:
             "--output", output_path,
         ]
         env = os.environ.copy()
-        # Give each worker its own Warp kernel cache to avoid compilation races.
+        # Each worker gets its own copy of the pre-compiled Warp kernel cache.
         cache_key = os.path.splitext(os.path.basename(output_path))[0]
-        env["WARP_CACHE_PATH"] = os.path.join(
+        worker_cache = os.path.join(
             tempfile.gettempdir(), f"warp_cache_{cache_key}",
         )
+        if self._warm_cache_dir is not None:
+            shutil.copytree(self._warm_cache_dir, worker_cache, dirs_exist_ok=True)
+        env["WARP_CACHE_PATH"] = worker_cache
         if self.config.num_gpus > 1:
             # Respect parent's CUDA_VISIBLE_DEVICES if set.
             parent_devs = os.environ.get("CUDA_VISIBLE_DEVICES", None)
@@ -334,6 +349,42 @@ class SeniorThesisBenchmarkSuite:
             print(f"Pre-training {spec.name} before parallel runs...")
             self._prepare_controller(controller, spec)
             del controller, task
+
+    def _warmup_warp_cache(
+        self,
+        script_path: str,
+        axis_name: str,
+        axis_value: float,
+        sweep_horizon: float,
+    ) -> str:
+        """Run one subprocess with minimal work to compile all Warp kernels."""
+        cache_dir = tempfile.mkdtemp(prefix="warp_warm_")
+        out_path = os.path.join(cache_dir, "warmup.npz")
+        env = os.environ.copy()
+        env["WARP_CACHE_PATH"] = cache_dir
+        print("Warming up Warp kernel cache (single compile)...")
+        cmd = [
+            sys.executable, script_path,
+            _WORKER_FLAG,
+            "--ctrl-idx", "0",
+            "--axis-value", str(axis_value),
+            "--axis-name", axis_name,
+            "--sweep-horizon", str(sweep_horizon),
+            "--output", out_path,
+            "--num-trials", "1",
+            "--max-iterations", "5",
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr[-2000:] if proc.stderr else "(no stderr)"
+            print(f"WARNING: Warp cache warm-up failed:\n{stderr_tail}")
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            return None
+        # Clean up the warmup result file, keep only the compiled cache.
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        print("Warp kernel cache ready.")
+        return cache_dir
 
     def _run_single_point(
         self,
@@ -464,6 +515,14 @@ class SeniorThesisBenchmarkSuite:
             # Pre-train memory controllers sequentially to avoid races.
             self._pretrain_all_memory(controller_factory)
 
+            script_path = os.path.abspath(sys.argv[0])
+            sweep_horizon = float(self.config.sweep_horizon_for_samples)
+
+            # Warm up Warp kernel cache once, then copy to each worker.
+            self._warm_cache_dir = self._warmup_warp_cache(
+                script_path, axis_name, float(axis_values[0]), sweep_horizon,
+            )
+
             # Build jobs: list of (ctrl_idx, value_idx, spec, axis_value).
             all_jobs = [
                 (ctrl_idx, value_idx, spec, float(axis_value))
@@ -485,9 +544,6 @@ class SeniorThesisBenchmarkSuite:
                 ]
             else:  # "all"
                 batches = [all_jobs]
-
-            script_path = os.path.abspath(sys.argv[0])
-            sweep_horizon = float(self.config.sweep_horizon_for_samples)
 
             gpu_info = f" | {self.config.num_gpus} GPU(s)" if self.config.num_gpus > 1 else ""
             print(
@@ -558,6 +614,11 @@ class SeniorThesisBenchmarkSuite:
                     shutil.rmtree(tmp_dir, ignore_errors=True)
 
             pbar.close()
+
+            # Clean up the shared warm cache.
+            if self._warm_cache_dir is not None:
+                shutil.rmtree(self._warm_cache_dir, ignore_errors=True)
+                self._warm_cache_dir = None
 
         return SweepResult(
             axis_name=axis_name,
