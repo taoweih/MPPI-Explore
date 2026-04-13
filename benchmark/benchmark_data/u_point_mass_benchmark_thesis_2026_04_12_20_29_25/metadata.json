@@ -1,0 +1,181 @@
+{
+  "task_name": "u_point_mass",
+  "controller_names": [
+    "MPPI",
+    "MPPI Density",
+    "MPPI Memory",
+    "MPPI Density + Memory"
+  ],
+  "config": {
+    "horizons": [
+      0.2,
+      0.34736842105263155,
+      0.49473684210526314,
+      0.6421052631578947,
+      0.7894736842105263,
+      0.9368421052631579,
+      1.0842105263157893,
+      1.2315789473684209,
+      1.3789473684210525,
+      1.526315789473684,
+      1.6736842105263157,
+      1.8210526315789473,
+      1.9684210526315786,
+      2.1157894736842104,
+      2.263157894736842,
+      2.4105263157894736,
+      2.557894736842105,
+      2.705263157894737,
+      2.8526315789473684,
+      3.0
+    ],
+    "num_samples_list": [
+      32,
+      84,
+      136,
+      188,
+      240,
+      293,
+      345,
+      397,
+      449,
+      501,
+      554,
+      606,
+      658,
+      710,
+      762,
+      815,
+      867,
+      919,
+      971,
+      1024
+    ],
+    "sweep_horizon_for_samples": 1.7,
+    "num_trials": 50,
+    "frequency": 50.0,
+    "goal_threshold": 0.4,
+    "max_iterations": 2000,
+    "record_video": false,
+    "video_trial_index": 0,
+    "output_tag": "thesis",
+    "pretrain_weights_dir": "/home/taowei/Documents/mppi_research/MPPI-Explore/benchmark/senior_thesis_benchmarks/saved_pretrain_weights",
+    "controller_params": {
+      "shared": {
+        "noise_level": 3.0,
+        "temperature": 0.001,
+        "num_knots": 16,
+        "num_samples_default": 512
+      },
+      "staged": {
+        "num_knots_per_stage": 4,
+        "kde_bandwidth": 0.15,
+        "inverse_density_power": 0.5
+      },
+      "memory": {
+        "memory_grid_min": -1.0,
+        "memory_grid_max": 1.0,
+        "hashgrid_num_levels": 4,
+        "hashgrid_table_size": 4096,
+        "hashgrid_min_resolution": 50.0,
+        "hashgrid_max_resolution": 200.0,
+        "online_learning_rate": 0.005,
+        "online_update_epochs": 1,
+        "online_batch_size": 1,
+        "online_anchor_samples": 0,
+        "online_new_state_weight": 10.0,
+        "goal_value": 0.0,
+        "goal_weight": 2000.0
+      },
+      "pretraining": {
+        "pretrain_sample_count": 100000,
+        "pretrain_epochs": 100,
+        "pretrain_batch_size": 512,
+        "pretrain_learning_rate": 0.001,
+        "pretrain_target_scale": 1.0
+      }
+    },
+    "parallel": "all",
+    "max_workers": "20",
+    "num_gpus": 2
+  },
+  "horizons": [
+    0.20000000298023224,
+    0.34736841917037964,
+    0.49473685026168823,
+    0.6421052813529968,
+    0.7894737124443054,
+    0.9368420839309692,
+    1.0842105150222778,
+    1.2315789461135864,
+    1.378947377204895,
+    1.5263158082962036,
+    1.6736842393875122,
+    1.8210526704788208,
+    1.9684211015701294,
+    2.1157894134521484,
+    2.263157844543457,
+    2.4105262756347656,
+    2.557894706726074,
+    2.705263137817383,
+    2.8526315689086914,
+    3.0
+  ],
+  "num_samples_list": [
+    32,
+    84,
+    136,
+    188,
+    240,
+    293,
+    345,
+    397,
+    449,
+    501,
+    554,
+    606,
+    658,
+    710,
+    762,
+    815,
+    867,
+    919,
+    971,
+    1024
+  ],
+  "controller_params": {
+    "shared": {
+      "noise_level": 3.0,
+      "temperature": 0.001,
+      "num_knots": 16,
+      "num_samples_default": 512
+    },
+    "staged": {
+      "num_knots_per_stage": 4,
+      "kde_bandwidth": 0.15,
+      "inverse_density_power": 0.5
+    },
+    "memory": {
+      "memory_grid_min": -1.0,
+      "memory_grid_max": 1.0,
+      "hashgrid_num_levels": 4,
+      "hashgrid_table_size": 4096,
+      "hashgrid_min_resolution": 50.0,
+      "hashgrid_max_resolution": 200.0,
+      "online_learning_rate": 0.005,
+      "online_update_epochs": 1,
+      "online_batch_size": 1,
+      "online_anchor_samples": 0,
+      "online_new_state_weight": 10.0,
+      "goal_value": 0.0,
+      "goal_weight": 2000.0
+    },
+    "pretraining": {
+      "pretrain_sample_count": 100000,
+      "pretrain_epochs": 100,
+      "pretrain_batch_size": 512,
+      "pretrain_learning_rate": 0.001,
+      "pretrain_target_scale": 1.0
+    }
+  }
+}
