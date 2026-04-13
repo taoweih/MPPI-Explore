@@ -211,8 +211,17 @@ def main():
                          edgecolor="black", facecolor="gray"))
             ax.add_patch(patches.Rectangle((-0.22, -0.19), 0.02, 0.4,
                          edgecolor="black", facecolor="gray"))
-            # Goal
-            ax.plot(goal_xy[0], goal_xy[1], "ro", markersize=8, label="Goal")
+            # Goal (radius 0.01 from scene.xml)
+            ax.add_patch(patches.Circle(
+                (goal_xy[0], goal_xy[1]), 0.01,
+                edgecolor="black", facecolor="red", linewidth=0.5, label="Goal",
+            ))
+            # Current point mass position (radius 0.01 from point_mass.xml)
+            pm_pos = mj_data.xpos[task.end_effector_pos_id, :2]
+            ax.add_patch(patches.Circle(
+                (pm_pos[0], pm_pos[1]), 0.01,
+                edgecolor="black", facecolor="lime", linewidth=0.5, label="Point Mass",
+            ))
 
         def _vis_fn(ctrl, step):
             visualize_memory(

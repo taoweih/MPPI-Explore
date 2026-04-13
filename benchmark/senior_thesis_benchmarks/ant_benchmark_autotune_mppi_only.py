@@ -47,8 +47,8 @@ RECORD_VIDEO = False
 OUTPUT_TAG = "thesis"
 
 # Parallelism — "sequential", "controllers", "axis", or "all"
-PARALLEL = "sequential"
-MAX_WORKERS = "auto"  # int or "auto" (= total jobs in batch)
+PARALLEL = "all"
+MAX_WORKERS = "8"  # int or "auto" (= total jobs in batch)
 NUM_GPUS = 1  # number of GPUs for round-robin assignment (1 = single GPU)
 
 # ════════════════════════════════════════════════════════════════════════

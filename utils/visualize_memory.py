@@ -77,7 +77,7 @@ def visualize_memory(
     ax.set_title(f"Value Memory — step {step}")
     ax.set_aspect("equal")
     fig.tight_layout()
-    fig.savefig(out_dir / f"memory_step_{step:05d}.png", dpi=150)
+    fig.savefig(out_dir / f"memory_step_{step:05d}.png", dpi=1200)
     plt.close(fig)
 
 

@@ -214,8 +214,17 @@ def main():
                     (ox, oy), 0.4,
                     edgecolor="black", facecolor="gray", alpha=0.8,
                 ))
-            # Goal
-            ax.plot(goal_xy[0], goal_xy[1], "ro", markersize=8, label="Goal")
+            # Goal (radius 0.3 from scene.xml)
+            ax.add_patch(patches.Circle(
+                (goal_xy[0], goal_xy[1]), 0.3,
+                edgecolor="black", facecolor="red", alpha=0.5, linewidth=0.5, label="Goal",
+            ))
+            # Current ant position (torso radius 0.25 from ant.xml)
+            ant_pos = mj_data.xpos[task.end_effector_pos_id, :2]
+            ax.add_patch(patches.Circle(
+                (ant_pos[0], ant_pos[1]), 0.25,
+                edgecolor="black", facecolor="lime", linewidth=0.5, label="Ant",
+            ))
 
         def _vis_fn(ctrl, step):
             visualize_memory(
