@@ -1,0 +1,119 @@
+{
+  "task_name": "ur5e",
+  "controller_names": [
+    "MPPI",
+    "MPPI Density",
+    "MPPI Memory",
+    "MPPI Density + Memory"
+  ],
+  "config": {
+    "horizons": [
+      0.3,
+      0.6499999999999999,
+      1.0
+    ],
+    "num_samples_list": [
+      512,
+      2304,
+      4096
+    ],
+    "sweep_horizon_for_samples": 0.5,
+    "num_trials": 20,
+    "frequency": 50.0,
+    "goal_threshold": 0.4,
+    "max_iterations": 1000,
+    "record_video": false,
+    "video_trial_index": 0,
+    "output_tag": "thesis",
+    "pretrain_weights_dir": "/home/taowei/Documents/mppi_research/MPPI-Explore/benchmark/senior_thesis_benchmarks/saved_pretrain_weights",
+    "controller_params": {
+      "shared": {
+        "noise_level": 3.0,
+        "temperature": 0.01,
+        "num_knots": 8,
+        "seed": 5,
+        "num_samples_default": 2048
+      },
+      "staged": {
+        "num_knots_per_stage": 2,
+        "kde_bandwidth": 0.3,
+        "inverse_density_power": 0.5,
+        "state_dim": 3,
+        "state_source_field": "site_xpos"
+      },
+      "memory": {
+        "memory_grid_min": -2.0,
+        "memory_grid_max": 2.0,
+        "hashgrid_num_levels": 8,
+        "hashgrid_table_size": 262144,
+        "hashgrid_min_resolution": 65.0,
+        "hashgrid_max_resolution": 130.0,
+        "online_learning_rate": 0.0001,
+        "online_update_epochs": 2,
+        "online_batch_size": 2,
+        "online_anchor_samples": 0,
+        "online_new_state_weight": 10.0,
+        "goal_value": 0.0,
+        "goal_weight": 1000.0
+      },
+      "pretraining": {
+        "pretrain_sample_count": 10000000,
+        "pretrain_epochs": 101,
+        "pretrain_batch_size": 51200,
+        "pretrain_learning_rate": 0.001,
+        "pretrain_target_scale": 1.0
+      }
+    },
+    "parallel": "all",
+    "max_workers": "12",
+    "num_gpus": 1
+  },
+  "horizons": [
+    0.30000001192092896,
+    0.6499999761581421,
+    1.0
+  ],
+  "num_samples_list": [
+    512,
+    2304,
+    4096
+  ],
+  "controller_params": {
+    "shared": {
+      "noise_level": 3.0,
+      "temperature": 0.01,
+      "num_knots": 8,
+      "seed": 5,
+      "num_samples_default": 2048
+    },
+    "staged": {
+      "num_knots_per_stage": 2,
+      "kde_bandwidth": 0.3,
+      "inverse_density_power": 0.5,
+      "state_dim": 3,
+      "state_source_field": "site_xpos"
+    },
+    "memory": {
+      "memory_grid_min": -2.0,
+      "memory_grid_max": 2.0,
+      "hashgrid_num_levels": 8,
+      "hashgrid_table_size": 262144,
+      "hashgrid_min_resolution": 65.0,
+      "hashgrid_max_resolution": 130.0,
+      "online_learning_rate": 0.0001,
+      "online_update_epochs": 2,
+      "online_batch_size": 2,
+      "online_anchor_samples": 0,
+      "online_new_state_weight": 10.0,
+      "goal_value": 0.0,
+      "goal_weight": 1000.0
+    },
+    "pretraining": {
+      "pretrain_sample_count": 10000000,
+      "pretrain_epochs": 101,
+      "pretrain_batch_size": 51200,
+      "pretrain_learning_rate": 0.001,
+      "pretrain_target_scale": 1.0
+    }
+  }
+}

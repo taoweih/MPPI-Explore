@@ -61,7 +61,7 @@ def main():
     hashgrid_table_size = 262144
     hashgrid_min_resolution = 65.0
     hashgrid_max_resolution = 130.0
-    online_learning_rate = 1e-4
+    online_learning_rate = 1e-3
     online_update_epochs = 2
     online_batch_size = 2
     online_anchor_samples = 0

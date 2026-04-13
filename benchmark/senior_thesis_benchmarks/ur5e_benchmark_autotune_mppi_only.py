@@ -29,15 +29,15 @@ from tasks import UR5e  # noqa: E402
 # ════════════════════════════════════════════════════════════════════════
 
 # Horizon sweep
-HORIZONS = np.linspace(0.1, 0.4, 5)
+HORIZONS = np.linspace(0.1, 0.4, 4)
 NUM_SAMPLES_FOR_HORIZON_SWEEP = 512
 
 # Sample sweep
-NUM_SAMPLES_LIST = [128, 256, 512, 1024, 2048, 4096]
+NUM_SAMPLES_LIST = np.linspace(32, 2048, 4, dtype=int).tolist()
 HORIZON_FOR_SAMPLE_SWEEP = 0.2
 
 # Trial settings
-NUM_TRIALS = 10
+NUM_TRIALS = 20
 MAX_ITERATIONS = 1000
 GOAL_THRESHOLD = 0.4
 FREQUENCY = 50.0
@@ -47,8 +47,8 @@ RECORD_VIDEO = False
 OUTPUT_TAG = "thesis"
 
 # Parallelism — "sequential", "controllers", "axis", or "all"
-PARALLEL = "sequential"
-MAX_WORKERS = "auto"  # int or "auto" (= total jobs in batch)
+PARALLEL = "all"
+MAX_WORKERS = "12"  # int or "auto" (= total jobs in batch)
 NUM_GPUS = 1  # number of GPUs for round-robin assignment (1 = single GPU)
 
 # ════════════════════════════════════════════════════════════════════════
