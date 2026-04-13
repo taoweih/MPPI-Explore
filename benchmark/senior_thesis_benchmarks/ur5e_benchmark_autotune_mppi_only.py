@@ -29,15 +29,15 @@ from tasks import UR5e  # noqa: E402
 # ════════════════════════════════════════════════════════════════════════
 
 # Horizon sweep
-HORIZONS = np.linspace(0.1, 0.4, 4)
+HORIZONS = np.linspace(0.1, 0.4, 10)
 NUM_SAMPLES_FOR_HORIZON_SWEEP = 512
 
 # Sample sweep
-NUM_SAMPLES_LIST = np.linspace(32, 2048, 4, dtype=int).tolist()
+NUM_SAMPLES_LIST = np.linspace(32, 1024, 10, dtype=int).tolist()
 HORIZON_FOR_SAMPLE_SWEEP = 0.2
 
 # Trial settings
-NUM_TRIALS = 20
+NUM_TRIALS = 50
 MAX_ITERATIONS = 1000
 GOAL_THRESHOLD = 0.4
 FREQUENCY = 50.0
@@ -48,8 +48,8 @@ OUTPUT_TAG = "thesis"
 
 # Parallelism — "sequential", "controllers", "axis", or "all"
 PARALLEL = "all"
-MAX_WORKERS = "12"  # int or "auto" (= total jobs in batch)
-NUM_GPUS = 1  # number of GPUs for round-robin assignment (1 = single GPU)
+MAX_WORKERS = "20"  # int or "auto" (= total jobs in batch)
+NUM_GPUS = 2  # number of GPUs for round-robin assignment (1 = single GPU)
 
 # ════════════════════════════════════════════════════════════════════════
 # CONTROLLER PARAMETERS — must match examples/ur5e.py
@@ -63,7 +63,7 @@ SEED = 5
 
 # Staged rollout
 NUM_KNOTS_PER_STAGE = 2
-KDE_BANDWIDTH = 0.30
+KDE_BANDWIDTH = 0.08
 INVERSE_DENSITY_POWER = 0.5
 STATE_DIM = 3
 STATE_SOURCE_FIELD = "site_xpos"
@@ -79,7 +79,7 @@ ONLINE_LEARNING_RATE = 1e-4
 ONLINE_UPDATE_EPOCHS = 2
 ONLINE_BATCH_SIZE = 2
 ONLINE_ANCHOR_SAMPLES = 0
-ONLINE_NEW_STATE_WEIGHT = 10.0
+ONLINE_NEW_STATE_WEIGHT = 5.0
 GOAL_VALUE = 0.0
 GOAL_WEIGHT = 1000.0
 
