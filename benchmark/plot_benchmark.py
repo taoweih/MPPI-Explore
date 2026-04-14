@@ -7,9 +7,12 @@ Examples:
     # All controllers, all metrics, both sweeps (default)
     python benchmark/plot_benchmark.py benchmark/benchmark_data/u_point_mass_benchmark_thesis_2026_04_12_20_29_25
 
-    # Only MPPI and Density
+    # Only MPPI and Density, only horizon sweep, only frequency
     python benchmark/plot_benchmark.py benchmark/benchmark_data/u_point_mass_benchmark_thesis_2026_04_12_20_29_25 \
-        --controllers "MPPI" "MPPI Density"
+        --controllers "MPPI" "MPPI Density" --sweep horizon --metrics frequency
+
+    # Multiple metrics
+    python benchmark/plot_benchmark.py <dir> --metrics success_rate frequency
 
 Output: benchmark/benchmark_data/thesis_plots/<task>_<ctrl_tag>_<sweep>_<metric>.png
 """
@@ -58,8 +61,8 @@ TASK_SHORT_NAMES = {
 CONTROLLER_FILE_TAGS = {
     frozenset(["MPPI"]): "mppi",
     frozenset(["MPPI", "MPPI Density"]): "density",
-    frozenset(["MPPI", "MPPI Memory"]): "memory",
-    frozenset(["MPPI", "MPPI Density", "MPPI Memory"]): "density_memory",
+    frozenset(["MPPI", "MPPI Memory"]): "value",
+    frozenset(["MPPI", "MPPI Density", "MPPI Memory"]): "density_value",
     frozenset(["MPPI", "MPPI Density", "MPPI Memory", "MPPI Density + Memory"]): "complete",
 }
 
@@ -286,6 +289,11 @@ def main():
         help=f"Output directory (default: {THESIS_PLOTS_DIR})",
     )
     parser.add_argument(
+        "--metrics", nargs="+", default=None,
+        choices=["success_rate", "success_time", "frequency"],
+        help="Which metrics to plot (default: all). e.g. success_rate frequency",
+    )
+    parser.add_argument(
         "--list", action="store_true", dest="list_controllers",
         help="List available controllers and exit",
     )
@@ -327,11 +335,15 @@ def main():
     print(f"Controllers: {ctrl_tag}")
     print()
 
+    selected_metrics = args.metrics  # None means all
+
     for sweep_key in sweep_keys:
         sweep = SWEEPS[sweep_key]
         x_values = bench[sweep["x_key"]]
 
         for m in sweep["metrics"]:
+            if selected_metrics and m["fname_metric"] not in selected_metrics:
+                continue
             data = bench["csvs"].get(m["csv"])
             if data is None:
                 continue
@@ -354,3 +366,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
