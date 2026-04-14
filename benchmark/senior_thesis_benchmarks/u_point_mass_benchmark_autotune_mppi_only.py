@@ -34,7 +34,7 @@ NUM_SAMPLES_FOR_HORIZON_SWEEP = 512
 
 # Sample sweep
 NUM_SAMPLES_LIST = np.linspace(32, 1024, 20, dtype=int).tolist()
-HORIZON_FOR_SAMPLE_SWEEP = 1.7
+HORIZON_FOR_SAMPLE_SWEEP = 1.5
 
 # Trial settings
 NUM_TRIALS = 50
@@ -49,7 +49,7 @@ OUTPUT_TAG = "thesis"
 # Parallelism — "sequential", "controllers", "axis", or "all"
 PARALLEL = "all"
 MAX_WORKERS = "20"  # int or "auto" (= total jobs in batch)
-NUM_GPUS = 2  # number of GPUs for round-robin assignment (1 = single GPU)
+NUM_GPUS = 1  # number of GPUs for round-robin assignment (1 = single GPU)
 
 # ════════════════════════════════════════════════════════════════════════
 # CONTROLLER PARAMETERS — must match examples/u_point_mass.py

@@ -934,9 +934,14 @@ class MPPIMemoryContinuous:
                 )
             self.mean = knots.copy()
         if reset_memory_to_pretrained and self._pretrained_weights is not None:
-            self.memory.load_weights(self._pretrained_weights)
+            # Reload pretrained weights without invalidating CUDA graphs.
+            # load_state_dict copies values into existing parameter tensors
+            # (same memory addresses), and sync_to_warp copies into existing
+            # Warp arrays.  The captured graphs read from these addresses, so
+            # replaying them with updated contents is safe.
+            self.memory.model.load_state_dict(self._pretrained_weights)
+            self.memory.sync_to_warp()
             self.memory_ready = True
-            self._invalidate_graphs()
 
     def set_state_from_mj_data(self, mj_data: mujoco.MjData) -> None:
         nw = self.num_samples

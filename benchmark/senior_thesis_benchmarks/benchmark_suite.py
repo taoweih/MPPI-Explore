@@ -105,6 +105,10 @@ class SweepConfig:
     parallel: Literal["sequential", "controllers", "axis", "all"] = "sequential"
     max_workers: Union[int, Literal["auto"]] = "auto"
     num_gpus: int = 1
+    # After parallel runs, do a short sequential pass with exclusive GPU
+    # access to get clean frequency numbers. Each controller runs num_trials
+    # trials of this many iterations. Set to 0 to skip.
+    freq_calibration_iters: int = 50
 
 
 @dataclass
@@ -199,6 +203,40 @@ class SeniorThesisBenchmarkSuite:
             sys.exit(0)
 
         use_parallel = self.config.parallel != "sequential"
+
+        # ── Print run summary ──────────────────────────────────────────
+        ctrl_names = ", ".join(s.name for s in self.controller_specs)
+        num_horizon = len(self.config.horizons)
+        has_samples = (
+            self.config.num_samples_list is not None
+            and len(self.config.num_samples_list) > 0
+        )
+        num_samples = len(self.config.num_samples_list) if has_samples else 0
+        total_points = (num_horizon + num_samples) * len(self.controller_specs)
+
+        print(f"\n{'='*60}")
+        print(f"Benchmark: {self.task_name}")
+        print(f"Controllers: {ctrl_names}")
+        print(f"Trials per point: {self.config.num_trials}")
+        print(f"Max iterations: {self.config.max_iterations}")
+        print(f"Horizon sweep: {num_horizon} values")
+        if has_samples:
+            print(f"Samples sweep: {num_samples} values "
+                  f"(horizon={self.config.sweep_horizon_for_samples:.3f}s)")
+        print(f"Total benchmark points: {total_points}")
+        if use_parallel:
+            workers = self.config.max_workers
+            workers_str = "auto" if workers == "auto" else str(workers)
+            gpu_str = f", {self.config.num_gpus} GPU(s)" if self.config.num_gpus > 1 else ""
+            print(f"Mode: parallel ({self.config.parallel}), "
+                  f"workers={workers_str}{gpu_str}")
+            if self.config.freq_calibration_iters > 0:
+                print(f"Freq calibration: {self.config.num_trials} trials x "
+                      f"{self.config.freq_calibration_iters} iters (sequential)")
+        else:
+            print(f"Mode: sequential (in-process)")
+        print(f"{'='*60}\n")
+
         mps_started = False
         if use_parallel:
             mps_started = _mps_start()
@@ -232,6 +270,22 @@ class SeniorThesisBenchmarkSuite:
         finally:
             if mps_started:
                 _mps_stop()
+
+        # ── Frequency calibration (sequential, exclusive GPU) ─────────
+        if use_parallel and self.config.freq_calibration_iters > 0:
+            self._run_freq_calibration(
+                horizon_result, horizon_values,
+                controller_factory=_horizon_controller_factory,
+            )
+            if sample_result is not None:
+                fixed_horizon = float(self.config.sweep_horizon_for_samples)
+                self._run_freq_calibration(
+                    sample_result,
+                    np.asarray(self.config.num_samples_list, dtype=np.int32),
+                    controller_factory=functools.partial(
+                        _sample_controller_factory, horizon=fixed_horizon,
+                    ),
+                )
 
         out_dir = self._save_results(
             horizon_result=horizon_result,
@@ -413,6 +467,59 @@ class SeniorThesisBenchmarkSuite:
             video_trial_index=self.config.video_trial_index,
         )
 
+    def _run_freq_calibration(
+        self,
+        sweep_result: "SweepResult",
+        axis_values: np.ndarray,
+        controller_factory: Callable[[ControllerSpec, object, float], object],
+    ) -> None:
+        """Sequential frequency calibration with exclusive GPU access."""
+        cal_iters = self.config.freq_calibration_iters
+        num_ctrl = len(self.controller_specs)
+        num_vals = len(axis_values)
+        total_jobs = num_vals * num_ctrl
+
+        print(f"\n{'─'*60}")
+        print(f"Frequency calibration: {self.config.num_trials} trials x "
+              f"{cal_iters} iters, sequential (exclusive GPU)")
+        print(f"{total_jobs} jobs total")
+        print(f"{'─'*60}")
+
+        for value_idx, axis_value in enumerate(
+            tqdm(axis_values, desc="freq calibration")
+        ):
+            for ctrl_idx, spec in enumerate(self.controller_specs):
+                job_num = value_idx * num_ctrl + ctrl_idx + 1
+                print(f"  [{job_num}/{total_jobs}] {spec.name} @ {float(axis_value)}")
+
+                task = self.task_factory()
+                controller = controller_factory(spec, task, float(axis_value))
+                self._prepare_controller(controller, spec)
+
+                mj_model = task.mj_model
+                mj_data = mujoco.MjData(mj_model)
+                mujoco.mj_forward(mj_model, mj_data)
+
+                result = run_benchmark(
+                    controller=controller,
+                    mj_model=mj_model,
+                    mj_data=mj_data,
+                    frequency=self.config.frequency,
+                    goal_threshold=1e9,  # never succeed — run all iters
+                    num_trials=self.config.num_trials,
+                    max_iterations=cal_iters,
+                    record_video=False,
+                )
+
+                sweep_result.frequency_mean[ctrl_idx, value_idx] = float(
+                    result.trial_frequencies.mean()
+                )
+                sweep_result.frequency_std[ctrl_idx, value_idx] = float(
+                    result.trial_frequencies.std()
+                )
+                print(f"    {result.trial_frequencies.mean():.1f} +/- "
+                      f"{result.trial_frequencies.std():.1f} Hz")
+
     def _store_result(
         self,
         result: "BenchmarkResult",
@@ -498,18 +605,25 @@ class SeniorThesisBenchmarkSuite:
         parallel = self.config.parallel
 
         if parallel == "sequential":
+            total_jobs = num_vals * num_ctrl
+            print(f"\nSequential {axis_name} sweep: "
+                  f"{num_vals} values x {num_ctrl} controllers = {total_jobs} jobs")
             for value_idx, axis_value in enumerate(
                 tqdm(axis_values, desc=f"{axis_name} sweep")
             ):
                 print(header_fn(float(axis_value)))
                 for ctrl_idx, spec in enumerate(self.controller_specs):
+                    job_num = value_idx * num_ctrl + ctrl_idx + 1
                     print(
-                        f"[{value_idx + 1}/{num_vals}] Running {spec.name}..."
+                        f"  [{job_num}/{total_jobs}] {spec.name}..."
                     )
                     result = self._run_single_point(
                         spec, float(axis_value), controller_factory,
                     )
                     self._store_result(result, ctrl_idx, value_idx, **store_args)
+                    print(
+                        f"    {result.num_success}/{self.config.num_trials} succeeded"
+                    )
 
         else:
             # Pre-train memory controllers sequentially to avoid races.
@@ -545,10 +659,10 @@ class SeniorThesisBenchmarkSuite:
             else:  # "all"
                 batches = [all_jobs]
 
-            gpu_info = f" | {self.config.num_gpus} GPU(s)" if self.config.num_gpus > 1 else ""
+            gpu_info = f", {self.config.num_gpus} GPU(s)" if self.config.num_gpus > 1 else ""
             print(
-                f"\nParallel mode: {parallel} | "
-                f"{len(all_jobs)} total jobs across {len(batches)} batch(es){gpu_info}"
+                f"\nParallel {axis_name} sweep ({parallel}): "
+                f"{len(all_jobs)} jobs across {len(batches)} batch(es){gpu_info}"
             )
 
             pbar = tqdm(total=len(all_jobs), desc=f"{axis_name} sweep", unit="job")

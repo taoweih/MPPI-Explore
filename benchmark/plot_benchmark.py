@@ -11,7 +11,7 @@ Examples:
     python benchmark/plot_benchmark.py benchmark/benchmark_data/u_point_mass_benchmark_thesis_2026_04_12_20_29_25 \
         --controllers "MPPI" "MPPI Density"
 
-Output: benchmark/benchmark_data/thesis_plots/<task> [<controllers>] <sweep> <metric>.png
+Output: benchmark/benchmark_data/thesis_plots/<task>_<ctrl_tag>_<sweep>_<metric>.png
 """
 
 from __future__ import annotations
@@ -44,6 +44,29 @@ TASK_DISPLAY_NAMES = {
     "u_point_mass": "U-Shaped Point Mass",
     "ur5e": "UR5e Reach",
     "ant": "Ant Locomotion",
+}
+
+# Short task prefix for filenames
+TASK_SHORT_NAMES = {
+    "u_point_mass": "u",
+    "ur5e": "ur5e",
+    "ant": "ant",
+}
+
+# Short controller tag for filenames — maps a frozenset of selected names
+# to a compact label.  "complete" = all controllers included.
+CONTROLLER_FILE_TAGS = {
+    frozenset(["MPPI"]): "mppi",
+    frozenset(["MPPI", "MPPI Density"]): "density",
+    frozenset(["MPPI", "MPPI Memory"]): "memory",
+    frozenset(["MPPI", "MPPI Density", "MPPI Memory"]): "density_memory",
+    frozenset(["MPPI", "MPPI Density", "MPPI Memory", "MPPI Density + Memory"]): "complete",
+}
+
+METRIC_FILE_NAMES = {
+    "success_rate": "success_rate",
+    "success_time": "success_time",
+    "frequency": "control_freq",
 }
 
 CONTROLLER_DISPLAY_NAMES = {
@@ -291,6 +314,13 @@ def main():
     display_selected = [CONTROLLER_DISPLAY_NAMES.get(n, n) for n in selected]
     ctrl_tag = ", ".join(display_selected)
 
+    # Build compact filename prefix
+    task_short = TASK_SHORT_NAMES.get(task_name, task_name)
+    ctrl_set = frozenset(selected)
+    ctrl_file_tag = CONTROLLER_FILE_TAGS.get(ctrl_set, "_".join(
+        s.lower().replace(" ", "_") for s in selected
+    ))
+
     sweep_keys = ["horizon", "samples"] if args.sweep == "both" else [args.sweep]
 
     print(f"Task: {display_name}")
@@ -307,7 +337,8 @@ def main():
                 continue
             std_data = bench["csvs"].get(m["std_csv"]) if m["std_csv"] else None
 
-            fname = f"{task_name} [{ctrl_tag}] {sweep_key} {m['fname_metric']}.png"
+            metric_file = METRIC_FILE_NAMES.get(m["fname_metric"], m["fname_metric"])
+            fname = f"{task_short}_{ctrl_file_tag}_{sweep_key}_{metric_file}.png"
             plot_matrix(
                 x_values, data, bench["controller_names"], ctrl_indices,
                 std=std_data,
