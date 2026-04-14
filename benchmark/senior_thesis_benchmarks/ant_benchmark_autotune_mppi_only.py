@@ -29,15 +29,15 @@ from tasks import Ant  # noqa: E402
 # ════════════════════════════════════════════════════════════════════════
 
 # Horizon sweep
-HORIZONS = np.linspace(0.5, 4.0, 4)
+HORIZONS = np.linspace(0.5, 4.0, 10)
 NUM_SAMPLES_FOR_HORIZON_SWEEP = 1024
 
 # Sample sweep
-NUM_SAMPLES_LIST = np.linspace(128, 2048, 4, dtype=int).tolist()
+NUM_SAMPLES_LIST = np.linspace(128, 2048, 10, dtype=int).tolist()
 HORIZON_FOR_SAMPLE_SWEEP = 2.0
 
 # Trial settings
-NUM_TRIALS = 10
+NUM_TRIALS = 30
 MAX_ITERATIONS = 10000
 GOAL_THRESHOLD = 0.5
 FREQUENCY = 50.0
@@ -48,8 +48,8 @@ OUTPUT_TAG = "thesis"
 
 # Parallelism — "sequential", "controllers", "axis", or "all"
 PARALLEL = "all"
-MAX_WORKERS = "8"  # int or "auto" (= total jobs in batch)
-NUM_GPUS = 1  # number of GPUs for round-robin assignment (1 = single GPU)
+MAX_WORKERS = "20"  # int or "auto" (= total jobs in batch)
+NUM_GPUS = 2  # number of GPUs for round-robin assignment (1 = single GPU)
 
 # ════════════════════════════════════════════════════════════════════════
 # CONTROLLER PARAMETERS — must match examples/ant.py
