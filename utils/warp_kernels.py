@@ -1,4 +1,4 @@
-"""Warp GPU kernels for staged rollout and memory-augmented MPPI.
+"""Warp GPU kernels for density-guided and value-guided MPPI.
 
 All kernels here are compatible with CUDA graph capture — they use only
 pre-allocated warp arrays and avoid any host/device synchronisation.
@@ -227,13 +227,13 @@ def rff_predict(
 @wp.kernel
 def blend_costs(
     base: wp.array1d(dtype=wp.float32),
-    memory: wp.array1d(dtype=wp.float32),
+    learned_value: wp.array1d(dtype=wp.float32),
     out: wp.array1d(dtype=wp.float32),
     mix: float,
 ):
-    """out = (1 - mix) * base + mix * memory."""
+    """out = (1 - mix) * base + mix * learned_value."""
     i = wp.tid()
-    out[i] = (1.0 - mix) * base[i] + mix * memory[i]
+    out[i] = (1.0 - mix) * base[i] + mix * learned_value[i]
 
 
 # ── Hash-grid encoding (2-D and 3-D) ───────────────────────────────────

@@ -1,4 +1,4 @@
-"""Memory-augmented MPPI with hash-grid + MLP value model.
+"""Value-guided MPPI with hash-grid + MLP learned value function.
 
 The learned value heuristic uses a multi-resolution hash grid encoder
 followed by a small MLP (matching the hydrax NeuralNet architecture).
@@ -48,7 +48,7 @@ from utils.warp_kernels import (
 # ---------------------------------------------------------------------------
 
 @dataclass
-class MemoryPretrainConfig:
+class ValuePretrainConfig:
     sample_count: int = 100000
     epochs: int = 300
     batch_size: int = 512
@@ -65,10 +65,10 @@ _HG_HIDDEN_DIM = 64
 
 
 # ---------------------------------------------------------------------------
-# Warp-backed hash-grid + MLP memory model
+# Warp-backed hash-grid + MLP learned value model
 # ---------------------------------------------------------------------------
 
-class _WarpHashGridMemory:
+class _LearnedValueModel:
     """Hash grid + MLP value model: PyTorch on CUDA for training, warp for graph inference.
 
     The model lives on the same CUDA device as the warp simulation.
@@ -393,7 +393,7 @@ class _WarpHashGridMemory:
 # Controller
 # ---------------------------------------------------------------------------
 
-class MPPIMemoryContinuous:
+class ValueGuidedMPPI:
     """MPPI augmented with a learned hash-grid + MLP value heuristic.
 
     Both the non-staged and staged rollout paths are fully CUDA-graph
@@ -402,7 +402,7 @@ class MPPIMemoryContinuous:
       * Initial data upload (controls, knots, noise, mean, weights)
       * Final cost readback (one float per sample)
 
-    Online memory training runs on the CPU after the rollout and syncs
+    Online learned value training runs on the CPU after the rollout and syncs
     the updated hash-grid weights to the GPU for the next call.
     """
 
@@ -417,7 +417,7 @@ class MPPIMemoryContinuous:
         kde_bandwidth: float = 1.0,
         state_weight: Optional[np.ndarray] = None,
         inverse_density_power: float = 1.0,
-        use_staged_rollout: bool = False,
+        use_density_guided: bool = False,
         plan_horizon: float = 1.0,
         spline_type: Literal["zero", "linear", "cubic"] = "zero",
         num_knots: int = 4,
@@ -428,9 +428,9 @@ class MPPIMemoryContinuous:
         state_source_field: str = "qpos",
         state_source_start: int = 0,
         state_source_body_id: Optional[int] = None,
-        # Hash-grid memory model
-        memory_grid_min: float = -10.0,
-        memory_grid_max: float = 10.0,
+        # Hash-grid learned value model
+        value_grid_min: float = -10.0,
+        value_grid_max: float = 10.0,
         hashgrid_num_levels: int = 16,
         hashgrid_table_size: int = 4096,
         hashgrid_min_resolution: float = 16.0,
@@ -446,7 +446,7 @@ class MPPIMemoryContinuous:
         goal_state: Optional[np.ndarray] = None,
         goal_value: float = 0.0,
         goal_weight: float = 200000.0,
-        auto_pretrain: bool = False,
+        auto_pretrain_value: bool = False,
     ) -> None:
         if spline_type != "zero":
             raise NotImplementedError(
@@ -474,7 +474,7 @@ class MPPIMemoryContinuous:
         )
         self.mean = np.zeros((num_knots, task.nu), dtype=np.float32)
 
-        self.use_staged_rollout = use_staged_rollout
+        self.use_density_guided = use_density_guided
         self.num_knots_per_stage = num_knots_per_stage
         self.kde_bandwidth = kde_bandwidth
         self.inverse_density_power = inverse_density_power
@@ -482,7 +482,7 @@ class MPPIMemoryContinuous:
         self._state_source_field = state_source_field
         self._state_source_start = state_source_start
         self._state_source_body_id = state_source_body_id
-        self.pretrained_weights_key: Optional[str] = None
+        self.pretrained_value_key: Optional[str] = None
 
         # Stage geometry.
         self._num_stages = int(math.floor(num_knots / num_knots_per_stage))
@@ -607,11 +607,11 @@ class MPPIMemoryContinuous:
             n_boundaries, dtype=wp.float32, device=self._device,
         )
 
-        # ── Hash-grid + MLP memory model ─────────────────────────────
-        self.memory = _WarpHashGridMemory(
+        # ── Hash-grid + MLP learned value model ──────────────────────
+        self.learned_value = _LearnedValueModel(
             state_dim=state_dim,
-            grid_min=float(memory_grid_min),
-            grid_max=float(memory_grid_max),
+            grid_min=float(value_grid_min),
+            grid_max=float(value_grid_max),
             num_levels=hashgrid_num_levels,
             table_size=hashgrid_table_size,
             min_resolution=hashgrid_min_resolution,
@@ -634,21 +634,21 @@ class MPPIMemoryContinuous:
         self.goal_value = float(goal_value)
         self.goal_weight = float(goal_weight)
 
-        self.auto_pretrain = auto_pretrain
-        self.memory_ready = False
-        self._pretrained_weights = None
+        self.auto_pretrain_value = auto_pretrain_value
+        self.learned_value_ready = False
+        self._pretrained_value_weights = None
         self._state_sampler: Optional[Callable] = None
         self._target_function: Optional[Callable] = None
-        self._pretrain_config = MemoryPretrainConfig()
+        self._pretrain_config = ValuePretrainConfig()
 
         # Pre-compute grid range inverse for the warp encode kernel.
         self._grid_range_inv = 1.0 / max(
-            self.memory.grid_max - self.memory.grid_min, 1e-6,
+            self.learned_value.grid_max - self.learned_value.grid_min, 1e-6,
         )
 
-        # CUDA graphs (built lazily, invalidated when memory_ready changes).
+        # CUDA graphs (built lazily, invalidated when learned_value_ready changes).
         self._rollout_graph: Optional[wp.Graph] = None
-        self._staged_graph: Optional[wp.Graph] = None
+        self._density_graph: Optional[wp.Graph] = None
 
     # ------------------------------------------------------------------
     # Graph helpers
@@ -656,7 +656,7 @@ class MPPIMemoryContinuous:
 
     def _invalidate_graphs(self) -> None:
         self._rollout_graph = None
-        self._staged_graph = None
+        self._density_graph = None
 
     def _launch_extract_state(self) -> None:
         src = getattr(self.warp_data, self._state_source_field)
@@ -676,13 +676,13 @@ class MPPIMemoryContinuous:
     def _emit_terminal_cost(self) -> None:
         """Emit GPU kernels for terminal cost.
 
-        When memory is ready the learned heuristic fully replaces the
+        When learned_value_ready the learned heuristic fully replaces the
         task's terminal cost.  Otherwise falls back to the task default.
 
         Called inside graph capture — adds kernel launches to the graph.
         """
         N = self.num_samples
-        if self.memory_ready:
+        if self.learned_value_ready:
             self._launch_extract_state()
 
             # Hash-grid encode.
@@ -694,13 +694,13 @@ class MPPIMemoryContinuous:
                 encode_kernel, dim=N,
                 inputs=[
                     self._states_wp,
-                    self.memory.embeddings_wp,
-                    self.memory.resolutions_wp,
+                    self.learned_value.embeddings_wp,
+                    self.learned_value.resolutions_wp,
                     self._features_wp,
-                    self.memory.grid_min,
+                    self.learned_value.grid_min,
                     self._grid_range_inv,
                     self._hg_num_levels,
-                    self.memory.table_size,
+                    self.learned_value.table_size,
                 ],
             )
 
@@ -709,8 +709,8 @@ class MPPIMemoryContinuous:
                 dense_swish, dim=N * _HG_HIDDEN_DIM,
                 inputs=[
                     self._features_wp,
-                    self.memory.W1_wp,
-                    self.memory.b1_wp,
+                    self.learned_value.W1_wp,
+                    self.learned_value.b1_wp,
                     self._hidden1_wp,
                     self._hg_input_dim,
                     _HG_HIDDEN_DIM,
@@ -722,8 +722,8 @@ class MPPIMemoryContinuous:
                 dense_swish, dim=N * _HG_HIDDEN_DIM,
                 inputs=[
                     self._hidden1_wp,
-                    self.memory.W2_wp,
-                    self.memory.b2_wp,
+                    self.learned_value.W2_wp,
+                    self.learned_value.b2_wp,
                     self._hidden2_wp,
                     _HG_HIDDEN_DIM,
                     _HG_HIDDEN_DIM,
@@ -735,8 +735,8 @@ class MPPIMemoryContinuous:
                 dense_linear_1d, dim=N,
                 inputs=[
                     self._hidden2_wp,
-                    self.memory.W_out_wp,
-                    self.memory.b_out_wp,
+                    self.learned_value.W_out_wp,
+                    self.learned_value.b_out_wp,
                     self._terminal_costs_wp,
                     _HG_HIDDEN_DIM,
                 ],
@@ -767,7 +767,7 @@ class MPPIMemoryContinuous:
             wp.capture_end()
             raise
 
-    def _build_staged_graph(self) -> None:
+    def _build_density_graph(self) -> None:
         N = self.num_samples
         nu = self.task.nu
 
@@ -842,11 +842,11 @@ class MPPIMemoryContinuous:
                     self.warp_data, self._running_costs_wp, self.dt,
                 )
 
-            # Terminal cost (with or without memory blend).
+            # Terminal cost (with or without value blend).
             self._terminal_costs_wp.zero_()
             self._emit_terminal_cost()
 
-            self._staged_graph = wp.capture_end()
+            self._density_graph = wp.capture_end()
         except Exception:
             wp.capture_end()
             raise
@@ -855,7 +855,7 @@ class MPPIMemoryContinuous:
     # Pretraining
     # ------------------------------------------------------------------
 
-    def configure_pretraining(
+    def configure_value_pretraining(
         self, state_sampler, target_function, config=None,
     ):
         self._state_sampler = state_sampler
@@ -863,8 +863,8 @@ class MPPIMemoryContinuous:
         if config is not None:
             self._pretrain_config = config
 
-    def pretrain_memory(self, force=False, verbose=True):
-        if self.memory_ready and not force:
+    def pretrain_learned_value(self, force=False, verbose=True):
+        if self.learned_value_ready and not force:
             return True
         if self._state_sampler is None or self._target_function is None:
             return False
@@ -877,44 +877,44 @@ class MPPIMemoryContinuous:
         ).reshape(-1)
         if verbose:
             print(
-                f"Pretraining memory with {states.shape[0]} samples, "
+                f"Pretraining learned value with {states.shape[0]} samples, "
                 f"{cfg.epochs} epochs, batch_size={cfg.batch_size}."
             )
-        self.memory.fit_pretrain(
+        self.learned_value.fit_pretrain(
             states, targets, epochs=cfg.epochs,
             batch_size=cfg.batch_size, learning_rate=cfg.learning_rate,
             verbose=verbose, print_every=cfg.print_every,
         )
-        self._pretrained_weights = self.memory.copy_weights()
-        self.memory_ready = True
+        self._pretrained_value_weights = self.learned_value.copy_weights()
+        self.learned_value_ready = True
         self._invalidate_graphs()
         return True
 
-    def restore_pretrained_memory(self):
-        if self._pretrained_weights is None:
+    def restore_pretrained_value(self):
+        if self._pretrained_value_weights is None:
             return False
-        self.memory.load_weights(self._pretrained_weights)
-        self.memory_ready = True
+        self.learned_value.load_weights(self._pretrained_value_weights)
+        self.learned_value_ready = True
         self._invalidate_graphs()
         return True
 
-    def save_pretrained_weights(self, path):
-        self.memory.save_weights_to_file(path)
-        self._pretrained_weights = self.memory.copy_weights()
-        self.memory_ready = True
+    def save_pretrained_value_weights(self, path):
+        self.learned_value.save_weights_to_file(path)
+        self._pretrained_value_weights = self.learned_value.copy_weights()
+        self.learned_value_ready = True
         self._invalidate_graphs()
 
-    def load_pretrained_weights(self, path):
-        self.memory.load_weights_from_file(path)
-        self._pretrained_weights = self.memory.copy_weights()
-        self.memory_ready = True
+    def load_pretrained_value_weights(self, path):
+        self.learned_value.load_weights_from_file(path)
+        self._pretrained_value_weights = self.learned_value.copy_weights()
+        self.learned_value_ready = True
         self._invalidate_graphs()
 
     # ------------------------------------------------------------------
     # State management
     # ------------------------------------------------------------------
 
-    def reset(self, seed=None, initial_knots=None, reset_memory_to_pretrained=True):
+    def reset(self, seed=None, initial_knots=None, reset_value_to_pretrained=True):
         if seed is None:
             seed = self.seed
         self.rng = np.random.default_rng(seed)
@@ -933,15 +933,15 @@ class MPPIMemoryContinuous:
                     f"initial_knots shape {knots.shape} != expected {expected}"
                 )
             self.mean = knots.copy()
-        if reset_memory_to_pretrained and self._pretrained_weights is not None:
+        if reset_value_to_pretrained and self._pretrained_value_weights is not None:
             # Reload pretrained weights without invalidating CUDA graphs.
             # load_state_dict copies values into existing parameter tensors
             # (same memory addresses), and sync_to_warp copies into existing
             # Warp arrays.  The captured graphs read from these addresses, so
             # replaying them with updated contents is safe.
-            self.memory.model.load_state_dict(self._pretrained_weights)
-            self.memory.sync_to_warp()
-            self.memory_ready = True
+            self.learned_value.model.load_state_dict(self._pretrained_value_weights)
+            self.learned_value.sync_to_warp()
+            self.learned_value_ready = True
 
     def set_state_from_mj_data(self, mj_data: mujoco.MjData) -> None:
         nw = self.num_samples
@@ -1018,7 +1018,7 @@ class MPPIMemoryContinuous:
         wp.capture_launch(self._rollout_graph)
         return self._running_costs_wp.numpy() + self._terminal_costs_wp.numpy()
 
-    def _staged_rollout(
+    def _density_rollout(
         self, controls: np.ndarray, knots: np.ndarray,
     ) -> np.ndarray:
         if self._num_stages <= 1:
@@ -1044,9 +1044,9 @@ class MPPIMemoryContinuous:
                 ).astype(np.float32)
                 buf.assign(noise)
 
-        if self._staged_graph is None:
-            self._build_staged_graph()
-        wp.capture_launch(self._staged_graph)
+        if self._density_graph is None:
+            self._build_density_graph()
+        wp.capture_launch(self._density_graph)
 
         costs = self._running_costs_wp.numpy() + self._terminal_costs_wp.numpy()
         final_knots = self._knots_wp.numpy()
@@ -1071,8 +1071,8 @@ class MPPIMemoryContinuous:
     # ------------------------------------------------------------------
 
     def optimize(self, mj_data: mujoco.MjData) -> np.ndarray:
-        if self.auto_pretrain and not self.memory_ready:
-            self.pretrain_memory(force=False, verbose=False)
+        if self.auto_pretrain_value and not self.learned_value_ready:
+            self.pretrain_learned_value(force=False, verbose=False)
 
         current_state_vec = self._current_state_vector(mj_data)
 
@@ -1082,8 +1082,8 @@ class MPPIMemoryContinuous:
         best_cost = np.inf
         if self.iterations == 1:
             knots, controls = self._sample_knots()
-            if self.use_staged_rollout:
-                total_costs, final_knots = self._staged_rollout(controls, knots)
+            if self.use_density_guided:
+                total_costs, final_knots = self._density_rollout(controls, knots)
                 self._update_weights(total_costs, final_knots)
             else:
                 total_costs = self._rollout(controls)
@@ -1094,22 +1094,22 @@ class MPPIMemoryContinuous:
             for _ in range(self.iterations):
                 self._restore_state(init_state)
                 knots, controls = self._sample_knots()
-                if self.use_staged_rollout:
-                    total_costs, final_knots = self._staged_rollout(controls, knots)
+                if self.use_density_guided:
+                    total_costs, final_knots = self._density_rollout(controls, knots)
                     self._update_weights(total_costs, final_knots)
                 else:
                     total_costs = self._rollout(controls)
                     self._update_weights(total_costs, knots)
                 best_cost = min(best_cost, float(np.min(total_costs)))
 
-        self._update_memory_online(
+        self._update_learned_value_online(
             states=current_state_vec[None, :],
             values=np.array([best_cost], dtype=np.float32),
         )
         return self.mean
 
     # ------------------------------------------------------------------
-    # Memory helpers
+    # Learned value helpers
     # ------------------------------------------------------------------
 
     def _current_state_vector(self, mj_data: mujoco.MjData) -> np.ndarray:
@@ -1120,7 +1120,7 @@ class MPPIMemoryContinuous:
         start = self._state_source_start
         return field[start : start + self.state_dim].astype(np.float32)
 
-    def _update_memory_online(
+    def _update_learned_value_online(
         self, states: np.ndarray, values: np.ndarray,
     ) -> None:
         states = np.asarray(states, dtype=np.float32)
@@ -1140,11 +1140,11 @@ class MPPIMemoryContinuous:
 
         if self.online_anchor_samples > 0:
             anchors = self.rng.uniform(
-                self.memory.grid_min,
-                self.memory.grid_max,
+                self.learned_value.grid_min,
+                self.learned_value.grid_max,
                 size=(self.online_anchor_samples, self.state_dim),
             ).astype(np.float32)
-            anchor_targets = self.memory.predict(anchors)
+            anchor_targets = self.learned_value.predict(anchors)
             all_states.append(anchors)
             all_targets.append(anchor_targets)
             all_weights.append(
@@ -1155,7 +1155,7 @@ class MPPIMemoryContinuous:
             all_targets.append(np.array([self.goal_value], dtype=np.float32))
             all_weights.append(np.array([self.goal_weight], dtype=np.float32))
 
-        self.memory.fit_online(
+        self.learned_value.fit_online(
             np.concatenate(all_states, axis=0),
             np.concatenate(all_targets, axis=0),
             epochs=self.online_update_epochs,
@@ -1166,4 +1166,4 @@ class MPPIMemoryContinuous:
             learning_rate=self.online_learning_rate,
             sample_weights=np.concatenate(all_weights, axis=0),
         )
-        self.memory_ready = True
+        self.learned_value_ready = True

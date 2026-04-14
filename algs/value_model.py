@@ -1,4 +1,4 @@
-"""Random Fourier feature value model for memory-augmented MPPI."""
+"""Random Fourier feature value model for value-guided MPPI."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import numpy as np
 
 
 @dataclass
-class MemoryPretrainConfig:
-    """Configuration for memory pretraining."""
+class ValuePretrainConfig:
+    """Configuration for value pretraining."""
 
     sample_count: int = 100000
     epochs: int = 300

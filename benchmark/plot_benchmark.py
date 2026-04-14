@@ -9,7 +9,7 @@ Examples:
 
     # Only MPPI and Density, only horizon sweep, only frequency
     python benchmark/plot_benchmark.py benchmark/benchmark_data/u_point_mass_benchmark_thesis_2026_04_12_20_29_25 \
-        --controllers "MPPI" "MPPI Density" --sweep horizon --metrics frequency
+        --controllers "MPPI" "Density-Guided MPPI" --sweep horizon --metrics frequency
 
     # Multiple metrics
     python benchmark/plot_benchmark.py <dir> --metrics success_rate frequency
@@ -60,10 +60,10 @@ TASK_SHORT_NAMES = {
 # to a compact label.  "complete" = all controllers included.
 CONTROLLER_FILE_TAGS = {
     frozenset(["MPPI"]): "mppi",
-    frozenset(["MPPI", "MPPI Density"]): "density",
-    frozenset(["MPPI", "MPPI Memory"]): "value",
-    frozenset(["MPPI", "MPPI Density", "MPPI Memory"]): "density_value",
-    frozenset(["MPPI", "MPPI Density", "MPPI Memory", "MPPI Density + Memory"]): "complete",
+    frozenset(["MPPI", "Density-Guided MPPI"]): "density",
+    frozenset(["MPPI", "Value-Guided MPPI"]): "value",
+    frozenset(["MPPI", "Density-Guided MPPI", "Value-Guided MPPI"]): "density_value",
+    frozenset(["MPPI", "Density-Guided MPPI", "Value-Guided MPPI", "Density + Value-Guided MPPI"]): "complete",
 }
 
 METRIC_FILE_NAMES = {
@@ -74,9 +74,9 @@ METRIC_FILE_NAMES = {
 
 CONTROLLER_DISPLAY_NAMES = {
     "MPPI": "MPPI",
-    "MPPI Density": "Density-Guided MPPI",
-    "MPPI Memory": "Value-Guided MPPI",
-    "MPPI Density + Memory": "Density + Value-Guided MPPI",
+    "Density-Guided MPPI": "Density-Guided MPPI",
+    "Value-Guided MPPI": "Value-Guided MPPI",
+    "Density + Value-Guided MPPI": "Density + Value-Guided MPPI",
 }
 
 
@@ -278,7 +278,7 @@ def main():
     parser.add_argument("bench_dir", type=Path, help="Benchmark data directory")
     parser.add_argument(
         "--controllers", nargs="+", default=None,
-        help='Controller names to plot (default: all). e.g. "MPPI" "MPPI Density"',
+        help='Controller names to plot (default: all). e.g. "MPPI" "Density-Guided MPPI"',
     )
     parser.add_argument(
         "--sweep", choices=["horizon", "samples", "both"], default="both",

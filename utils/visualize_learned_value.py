@@ -12,7 +12,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 
 
-def visualize_memory(
+def visualize_learned_value(
     controller,
     step: int,
     *,
@@ -24,12 +24,12 @@ def visualize_memory(
     xlim: Optional[tuple[float, float]] = None,
     ylim: Optional[tuple[float, float]] = None,
 ) -> None:
-    """Render the controller's value memory as a 2D heatmap and save to disk.
+    """Render the controller's learned value as a 2D heatmap and save to disk.
 
     Parameters
     ----------
     controller:
-        An ``MPPIMemoryContinuous`` instance (must have ``.memory``).
+        A ``ValueGuidedMPPI`` instance (must have ``.learned_value``).
     step:
         Current simulation step (used in filename and title).
     resolution:
@@ -44,16 +44,16 @@ def visualize_memory(
     xlim, ylim:
         Optional (min, max) tuples to crop the view. Defaults to full grid.
     """
-    memory = controller.memory
-    x0, x1 = xlim if xlim is not None else (memory.grid_min, memory.grid_max)
-    y0, y1 = ylim if ylim is not None else (memory.grid_min, memory.grid_max)
+    lv = controller.learned_value
+    x0, x1 = xlim if xlim is not None else (lv.grid_min, lv.grid_max)
+    y0, y1 = ylim if ylim is not None else (lv.grid_min, lv.grid_max)
 
     xs = np.linspace(x0, x1, resolution, dtype=np.float32)
     ys = np.linspace(y0, y1, resolution, dtype=np.float32)
     xx, yy = np.meshgrid(xs, ys)
     states = np.stack([xx.ravel(), yy.ravel()], axis=-1)  # (res*res, 2)
 
-    values = memory.predict(states).reshape(resolution, resolution)
+    values = lv.predict(states).reshape(resolution, resolution)
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -74,14 +74,14 @@ def visualize_memory(
 
     ax.set_xlabel("X", fontsize=14)
     ax.set_ylabel("Y", fontsize=14)
-    ax.set_title(f"Value Memory — step {step}")
+    ax.set_title(f"Learned Value — step {step}")
     ax.set_aspect("equal")
     fig.tight_layout()
-    fig.savefig(out_dir / f"memory_step_{step:05d}.png", dpi=1200)
+    fig.savefig(out_dir / f"learned_value_step_{step:05d}.png", dpi=1200)
     plt.close(fig)
 
 
-def visualize_memory_3d(
+def visualize_learned_value_3d(
     controller,
     step: int,
     *,
@@ -93,7 +93,7 @@ def visualize_memory_3d(
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
 ) -> None:
-    """Render a 2D slice of a 3D value memory as a heatmap.
+    """Render a 2D slice of a 3D learned value as a heatmap.
 
     Parameters
     ----------
@@ -102,9 +102,9 @@ def visualize_memory_3d(
     slice_value:
         The value at which to slice the held-fixed dimension.
     """
-    memory = controller.memory
-    grid_min = memory.grid_min
-    grid_max = memory.grid_max
+    lv = controller.learned_value
+    grid_min = lv.grid_min
+    grid_max = lv.grid_max
 
     # The two free axes
     free_dims = [d for d in range(3) if d != slice_dim]
@@ -120,7 +120,7 @@ def visualize_memory_3d(
     states[:, free_dims[1]] = flat_b
     states[:, slice_dim] = slice_value
 
-    values = memory.predict(states).reshape(resolution, resolution)
+    values = lv.predict(states).reshape(resolution, resolution)
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -142,12 +142,12 @@ def visualize_memory_3d(
     ax.set_xlabel(axis_labels[free_dims[0]], fontsize=14)
     ax.set_ylabel(axis_labels[free_dims[1]], fontsize=14)
     ax.set_title(
-        f"Value Memory — step {step} "
+        f"Learned Value — step {step} "
         f"({axis_labels[slice_dim]}={slice_value:.2f})"
     )
     ax.set_aspect("equal")
     fig.tight_layout()
-    fig.savefig(out_dir / f"memory_step_{step:05d}.png", dpi=150)
+    fig.savefig(out_dir / f"learned_value_step_{step:05d}.png", dpi=150)
     plt.close(fig)
 
 
@@ -188,7 +188,7 @@ def _draw_cylinder(
     ax.add_collection3d(Poly3DCollection([bot_cap], alpha=alpha, facecolor=color, edgecolor="none"))
 
 
-def visualize_memory_3d_scatter(
+def visualize_learned_value_3d_scatter(
     controller,
     step: int,
     *,
@@ -208,12 +208,12 @@ def visualize_memory_3d_scatter(
     alpha: float = 0.4,
     value_threshold: Optional[float] = None,
 ) -> None:
-    """Render the 3D value memory as a volumetric scatter plot.
+    """Render the 3D learned value as a volumetric scatter plot.
 
     Parameters
     ----------
     controller:
-        An ``MPPIMemoryContinuous`` instance.
+        A ``ValueGuidedMPPI`` instance.
     step:
         Current simulation step.
     resolution:
@@ -241,10 +241,10 @@ def visualize_memory_3d_scatter(
         If set, only show points with value below this threshold.
         Helps declutter the plot by hiding high-cost regions.
     """
-    memory = controller.memory
-    x0, x1 = xlim if xlim is not None else (memory.grid_min, memory.grid_max)
-    y0, y1 = ylim if ylim is not None else (memory.grid_min, memory.grid_max)
-    z0, z1 = zlim if zlim is not None else (memory.grid_min, memory.grid_max)
+    lv = controller.learned_value
+    x0, x1 = xlim if xlim is not None else (lv.grid_min, lv.grid_max)
+    y0, y1 = ylim if ylim is not None else (lv.grid_min, lv.grid_max)
+    z0, z1 = zlim if zlim is not None else (lv.grid_min, lv.grid_max)
 
     xs = np.linspace(x0, x1, resolution, dtype=np.float32)
     ys = np.linspace(y0, y1, resolution, dtype=np.float32)
@@ -252,7 +252,7 @@ def visualize_memory_3d_scatter(
     XX, YY, ZZ = np.meshgrid(xs, ys, zs, indexing="ij")
 
     states = np.stack([XX.ravel(), YY.ravel(), ZZ.ravel()], axis=-1)
-    values = memory.predict(states)
+    values = lv.predict(states)
     coords = states
 
     # Filter by threshold to reduce clutter
@@ -304,11 +304,11 @@ def visualize_memory_3d_scatter(
     ax.set_ylim(y0, y1)
     ax.set_zlim(z0, z1)
     ax.view_init(elev=elev, azim=azim)
-    ax.set_title(f"Value Memory — step {step}", fontsize=14)
+    ax.set_title(f"Learned Value — step {step}", fontsize=14)
 
     if goal_xyz is not None or ee_xyz is not None:
         ax.legend(loc="upper left", fontsize=10)
 
     fig.tight_layout()
-    fig.savefig(out_dir / f"memory_step_{step:05d}.png", dpi=150)
+    fig.savefig(out_dir / f"learned_value_step_{step:05d}.png", dpi=150)
     plt.close(fig)

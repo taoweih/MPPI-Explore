@@ -1,10 +1,10 @@
 from .mppi import MPPI
-from .mppi_staged_rollout import MPPIStagedRollout
-from .mppi_memory import MPPIMemoryContinuous, MemoryPretrainConfig
+from .density_guided_mppi import DensityGuidedMPPI
+from .value_guided_mppi import ValueGuidedMPPI, ValuePretrainConfig
 
 __all__ = [
 	"MPPI",
-	"MPPIStagedRollout",
-	"MPPIMemoryContinuous",
-	"MemoryPretrainConfig",
+	"DensityGuidedMPPI",
+	"ValueGuidedMPPI",
+	"ValuePretrainConfig",
 ]

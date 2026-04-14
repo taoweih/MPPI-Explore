@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from algs import (  # noqa: E402
     MPPI,
-    MPPIStagedRollout,
-    MPPIMemoryContinuous,
-    MemoryPretrainConfig,
+    DensityGuidedMPPI,
+    ValueGuidedMPPI,
+    ValuePretrainConfig,
 )
 from benchmark.senior_thesis_benchmarks.benchmark_suite import (  # noqa: E402
     ControllerSpec,
@@ -65,9 +65,9 @@ NUM_KNOTS_PER_STAGE = 4
 KDE_BANDWIDTH = 0.15
 INVERSE_DENSITY_POWER = 0.5
 
-# Memory
-MEMORY_GRID_MIN = -1.0
-MEMORY_GRID_MAX = 1.0
+# Learned value
+VALUE_GRID_MIN = -1.0
+VALUE_GRID_MAX = 1.0
 HASHGRID_NUM_LEVELS = 4
 HASHGRID_TABLE_SIZE = 4096
 HASHGRID_MIN_RESOLUTION = 50.0
@@ -96,17 +96,17 @@ def _goal_xy(task: UPointMass) -> np.ndarray:
     return np.asarray(data.xpos[task.goal_pos_id, :2], dtype=np.float32)
 
 
-def _memory_controller(
+def _learned_value_controller(
     task: UPointMass,
     horizon: float,
     *,
-    use_staged_rollout: bool,
+    use_density_guided: bool,
     num_samples: Optional[int] = None,
-) -> MPPIMemoryContinuous:
+) -> ValueGuidedMPPI:
     goal_xy = _goal_xy(task)
     n = NUM_SAMPLES_FOR_HORIZON_SWEEP if num_samples is None else int(num_samples)
 
-    controller = MPPIMemoryContinuous(
+    controller = ValueGuidedMPPI(
         task=task,
         num_samples=n,
         noise_level=NOISE_LEVEL,
@@ -118,8 +118,8 @@ def _memory_controller(
         seed=0,
         state_dim=2,
         state_source_field="qpos",
-        memory_grid_min=MEMORY_GRID_MIN,
-        memory_grid_max=MEMORY_GRID_MAX,
+        value_grid_min=VALUE_GRID_MIN,
+        value_grid_max=VALUE_GRID_MAX,
         hashgrid_num_levels=HASHGRID_NUM_LEVELS,
         hashgrid_table_size=HASHGRID_TABLE_SIZE,
         hashgrid_min_resolution=HASHGRID_MIN_RESOLUTION,
@@ -132,23 +132,23 @@ def _memory_controller(
         goal_state=goal_xy[None, :],
         goal_value=GOAL_VALUE,
         goal_weight=GOAL_WEIGHT,
-        use_staged_rollout=use_staged_rollout,
+        use_density_guided=use_density_guided,
         num_knots_per_stage=NUM_KNOTS_PER_STAGE,
         kde_bandwidth=KDE_BANDWIDTH,
         inverse_density_power=INVERSE_DENSITY_POWER,
     )
 
     def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
-        return rng.uniform(MEMORY_GRID_MIN, MEMORY_GRID_MAX, size=(n, 2)).astype(np.float32)
+        return rng.uniform(VALUE_GRID_MIN, VALUE_GRID_MAX, size=(n, 2)).astype(np.float32)
 
     def target_function(states: np.ndarray) -> np.ndarray:
         diff = states - goal_xy[None, :]
         return PRETRAIN_TARGET_SCALE * np.sqrt(np.sum(diff * diff, axis=1)).astype(np.float32)
 
-    controller.configure_pretraining(
+    controller.configure_value_pretraining(
         state_sampler=state_sampler,
         target_function=target_function,
-        config=MemoryPretrainConfig(
+        config=ValuePretrainConfig(
             sample_count=PRETRAIN_SAMPLE_COUNT,
             epochs=PRETRAIN_EPOCHS,
             batch_size=PRETRAIN_BATCH_SIZE,
@@ -156,7 +156,7 @@ def _memory_controller(
             print_every=50,
         ),
     )
-    controller.pretrained_weights_key = "u_point_mass_memory"
+    controller.pretrained_value_key = "u_point_mass_learned_value"
     return controller
 
 
@@ -169,9 +169,9 @@ def _mppi_factory(task, h, num_samples=None):
     )
 
 
-def _staged_factory(task, h, num_samples=None):
+def _density_factory(task, h, num_samples=None):
     n = NUM_SAMPLES_FOR_HORIZON_SWEEP if num_samples is None else int(num_samples)
-    return MPPIStagedRollout(
+    return DensityGuidedMPPI(
         task=task, num_samples=n, noise_level=NOISE_LEVEL,
         temperature=TEMPERATURE, plan_horizon=h, spline_type="zero",
         num_knots=NUM_KNOTS, iterations=1, seed=0,
@@ -182,20 +182,20 @@ def _staged_factory(task, h, num_samples=None):
     )
 
 
-def _memory_factory(task, h, num_samples=None):
-    return _memory_controller(task, h, use_staged_rollout=False, num_samples=num_samples)
+def _learned_value_factory(task, h, num_samples=None):
+    return _learned_value_controller(task, h, use_density_guided=False, num_samples=num_samples)
 
 
-def _memory_staged_factory(task, h, num_samples=None):
-    return _memory_controller(task, h, use_staged_rollout=True, num_samples=num_samples)
+def _density_learned_value_factory(task, h, num_samples=None):
+    return _learned_value_controller(task, h, use_density_guided=True, num_samples=num_samples)
 
 
 def build_controller_specs() -> list[ControllerSpec]:
     return [
         ControllerSpec(name="MPPI", factory=_mppi_factory),
-        ControllerSpec(name="MPPI Density", factory=_staged_factory),
-        ControllerSpec(name="MPPI Memory", factory=_memory_factory),
-        ControllerSpec(name="MPPI Density + Memory", factory=_memory_staged_factory),
+        ControllerSpec(name="Density-Guided MPPI", factory=_density_factory),
+        ControllerSpec(name="Value-Guided MPPI", factory=_learned_value_factory),
+        ControllerSpec(name="Density + Value-Guided MPPI", factory=_density_learned_value_factory),
     ]
 
 
@@ -225,14 +225,14 @@ def main() -> None:
                     "num_knots": NUM_KNOTS,
                     "num_samples_default": NUM_SAMPLES_FOR_HORIZON_SWEEP,
                 },
-                "staged": {
+                "density": {
                     "num_knots_per_stage": NUM_KNOTS_PER_STAGE,
                     "kde_bandwidth": KDE_BANDWIDTH,
                     "inverse_density_power": INVERSE_DENSITY_POWER,
                 },
-                "memory": {
-                    "memory_grid_min": MEMORY_GRID_MIN,
-                    "memory_grid_max": MEMORY_GRID_MAX,
+                "learned_value": {
+                    "value_grid_min": VALUE_GRID_MIN,
+                    "value_grid_max": VALUE_GRID_MAX,
                     "hashgrid_num_levels": HASHGRID_NUM_LEVELS,
                     "hashgrid_table_size": HASHGRID_TABLE_SIZE,
                     "hashgrid_min_resolution": HASHGRID_MIN_RESOLUTION,

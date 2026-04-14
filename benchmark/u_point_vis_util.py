@@ -1,6 +1,6 @@
-"""Crop U point mass memory heatmaps for thesis figures.
+"""Crop U point mass learned value heatmaps for thesis figures.
 
-Extracts the heatmap region from visualize/u_point_mass/memory_step_*.png,
+Extracts the heatmap region from visualize/u_point_mass/learned_value_step_*.png,
 crops to the U obstacle + goal area, strips axes/colorbar/title, adds a
 time label, and saves clean panels to thesis_plots.
 
@@ -29,10 +29,10 @@ STEPS = [0, 250, 500, 750]
 # Frequency (steps -> seconds)
 FREQUENCY = 50.0  # Hz
 
-# Original heatmap data extent (from visualize_memory: extent=[-1, 1, -1, 1])
+# Original heatmap data extent (from visualize_learned_value: extent=[-1, 1, -1, 1])
 DATA_EXTENT = (-1.0, 1.0, -1.0, 1.0)  # (x0, x1, y0, y1)
 
-# Original figure layout (from visualize_memory: figsize=(8,7), dpi=150)
+# Original figure layout (from visualize_learned_value: figsize=(8,7), dpi=150)
 # Axes bounding box in figure-fraction coords (computed from matplotlib layout)
 AX_FRAC = (0.1149, 0.1276, 0.7932, 0.9028)  # (x0, y0, x1, y1)
 
@@ -82,7 +82,7 @@ def main():
     step_dt = 1.0 / FREQUENCY
 
     for step in STEPS:
-        src = VIS_DIR / f"memory_step_{step:05d}.png"
+        src = VIS_DIR / f"learned_value_step_{step:05d}.png"
         if not src.exists():
             print(f"WARNING: {src} not found, skipping step {step}")
             continue
@@ -129,7 +129,7 @@ def main():
         )
 
         fig.tight_layout(pad=0)
-        out_path = OUT_DIR / f"u_point_mass_memory_t{t_sec:.0f}s.png"
+        out_path = OUT_DIR / f"u_point_mass_learned_value_t{t_sec:.0f}s.png"
         fig.savefig(out_path, dpi=600, bbox_inches="tight", pad_inches=0.02)
         plt.close(fig)
         print(f"Saved: {out_path}")

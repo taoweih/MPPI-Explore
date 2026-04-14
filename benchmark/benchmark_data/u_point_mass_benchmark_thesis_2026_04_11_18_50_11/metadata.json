@@ -2,9 +2,9 @@
   "task_name": "u_point_mass",
   "controller_names": [
     "MPPI",
-    "MPPI Density",
-    "MPPI Memory",
-    "MPPI Density + Memory"
+    "Density-Guided MPPI",
+    "Value-Guided MPPI",
+    "Density + Value-Guided MPPI"
   ],
   "config": {
     "horizons": [
@@ -47,14 +47,14 @@
         "num_knots": 16,
         "num_samples_default": 512
       },
-      "staged": {
+      "density": {
         "num_knots_per_stage": 4,
         "kde_bandwidth": 0.15,
         "inverse_density_power": 0.5
       },
-      "memory": {
-        "memory_grid_min": -1.0,
-        "memory_grid_max": 1.0,
+      "learned_value": {
+        "value_grid_min": -1.0,
+        "value_grid_max": 1.0,
         "online_learning_rate": 0.0005,
         "online_update_epochs": 1,
         "online_batch_size": 1,
@@ -103,14 +103,14 @@
       "num_knots": 16,
       "num_samples_default": 512
     },
-    "staged": {
+    "density": {
       "num_knots_per_stage": 4,
       "kde_bandwidth": 0.15,
       "inverse_density_power": 0.5
     },
-    "memory": {
-      "memory_grid_min": -1.0,
-      "memory_grid_max": 1.0,
+    "learned_value": {
+      "value_grid_min": -1.0,
+      "value_grid_max": 1.0,
       "online_learning_rate": 0.0005,
       "online_update_epochs": 1,
       "online_batch_size": 1,

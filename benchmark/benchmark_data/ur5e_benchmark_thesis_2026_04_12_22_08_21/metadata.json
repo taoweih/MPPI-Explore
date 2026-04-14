@@ -2,9 +2,9 @@
   "task_name": "ur5e",
   "controller_names": [
     "MPPI",
-    "MPPI Density",
-    "MPPI Memory",
-    "MPPI Density + Memory"
+    "Density-Guided MPPI",
+    "Value-Guided MPPI",
+    "Density + Value-Guided MPPI"
   ],
   "config": {
     "horizons": [
@@ -36,16 +36,16 @@
         "seed": 5,
         "num_samples_default": 512
       },
-      "staged": {
+      "density": {
         "num_knots_per_stage": 2,
         "kde_bandwidth": 0.08,
         "inverse_density_power": 0.5,
         "state_dim": 3,
         "state_source_field": "site_xpos"
       },
-      "memory": {
-        "memory_grid_min": -2.0,
-        "memory_grid_max": 2.0,
+      "learned_value": {
+        "value_grid_min": -2.0,
+        "value_grid_max": 2.0,
         "hashgrid_num_levels": 8,
         "hashgrid_table_size": 262144,
         "hashgrid_min_resolution": 65.0,
@@ -90,16 +90,16 @@
       "seed": 5,
       "num_samples_default": 512
     },
-    "staged": {
+    "density": {
       "num_knots_per_stage": 2,
       "kde_bandwidth": 0.08,
       "inverse_density_power": 0.5,
       "state_dim": 3,
       "state_source_field": "site_xpos"
     },
-    "memory": {
-      "memory_grid_min": -2.0,
-      "memory_grid_max": 2.0,
+    "learned_value": {
+      "value_grid_min": -2.0,
+      "value_grid_max": 2.0,
       "hashgrid_num_levels": 8,
       "hashgrid_table_size": 262144,
       "hashgrid_min_resolution": 65.0,

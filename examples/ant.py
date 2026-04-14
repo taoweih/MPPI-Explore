@@ -12,13 +12,13 @@ import numpy as np
 
 from algs import (
     MPPI,
-    MPPIStagedRollout,
-    MPPIMemoryContinuous,
-    MemoryPretrainConfig,
+    DensityGuidedMPPI,
+    ValueGuidedMPPI,
+    ValuePretrainConfig,
 )
 from simulation.deterministic import run_interactive
 from tasks.ant import Ant
-from utils.visualize_memory import visualize_memory
+from utils.visualize_learned_value import visualize_learned_value
 
 WEIGHTS_DIR = (
     Path(__file__).resolve().parents[1]
@@ -34,7 +34,7 @@ def main():
         "controller",
         nargs="?",
         default="mppi",
-        choices=("mppi", "staged", "memory", "memory_staged"),
+        choices=("mppi", "density", "learned_value", "density_learned_value"),
     )
     args = parser.parse_args()
 
@@ -48,16 +48,16 @@ def main():
     iterations = 1
     seed = 0
 
-    # ── Staged rollout parameters ───────────────────────────────────────
+    # ── Density-guided parameters ────────────────────────────────────────
     num_knots_per_stage = 4
     kde_bandwidth = 0.10
     inverse_density_power = 0.5
     state_dim = 2
     state_source_field = "qpos"
 
-    # ── Memory parameters ───────────────────────────────────────────────
-    memory_grid_min = -10.0
-    memory_grid_max = 10.0
+    # ── Learned value parameters ───────────────────────────────────────
+    value_grid_min = -10.0
+    value_grid_max = 10.0
     hashgrid_num_levels = 8
     hashgrid_table_size = 4096
     hashgrid_min_resolution = 40.0
@@ -69,7 +69,7 @@ def main():
     online_new_state_weight = 1.0
     goal_value = 0.0
     goal_weight = 2000.0
-    weights_key = "ant_memory"
+    weights_key = "ant_learned_value"
     pretrain_mode = "load"  # "load" or "train"
 
     # ── Pretraining parameters ──────────────────────────────────────────
@@ -97,7 +97,7 @@ def main():
     mj_data = mujoco.MjData(mj_model)
     mujoco.mj_forward(mj_model, mj_data)
 
-    # Goal position (needed for memory variants)
+    # Goal position (needed for learned value variants)
     _tmp_data = mujoco.MjData(task.mj_model)
     mujoco.mj_forward(task.mj_model, _tmp_data)
     goal_xy = np.asarray(_tmp_data.xpos[task.goal_pos_id, :2], dtype=np.float32)
@@ -115,8 +115,8 @@ def main():
         seed=seed,
     )
 
-    if args.controller == "staged":
-        controller = MPPIStagedRollout(
+    if args.controller == "density":
+        controller = DensityGuidedMPPI(
             **shared,
             num_knots_per_stage=num_knots_per_stage,
             kde_bandwidth=kde_bandwidth,
@@ -125,14 +125,14 @@ def main():
             state_source_field=state_source_field,
         )
 
-    elif args.controller in ("memory", "memory_staged"):
-        use_staged = args.controller == "memory_staged"
-        controller = MPPIMemoryContinuous(
+    elif args.controller in ("learned_value", "density_learned_value"):
+        use_density = args.controller == "density_learned_value"
+        controller = ValueGuidedMPPI(
             **shared,
             state_dim=state_dim,
             state_source_field=state_source_field,
-            memory_grid_min=memory_grid_min,
-            memory_grid_max=memory_grid_max,
+            value_grid_min=value_grid_min,
+            value_grid_max=value_grid_max,
             hashgrid_num_levels=hashgrid_num_levels,
             hashgrid_table_size=hashgrid_table_size,
             hashgrid_min_resolution=hashgrid_min_resolution,
@@ -145,23 +145,23 @@ def main():
             goal_state=goal_xy[None, :],
             goal_value=goal_value,
             goal_weight=goal_weight,
-            use_staged_rollout=use_staged,
+            use_density_guided=use_density,
             num_knots_per_stage=num_knots_per_stage,
             kde_bandwidth=kde_bandwidth,
             inverse_density_power=inverse_density_power,
         )
 
         def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
-            return rng.uniform(memory_grid_min, memory_grid_max, size=(n, state_dim)).astype(np.float32)
+            return rng.uniform(value_grid_min, value_grid_max, size=(n, state_dim)).astype(np.float32)
 
         def target_function(states: np.ndarray) -> np.ndarray:
             diff = states - goal_xy[None, :]
             return pretrain_target_scale * np.sqrt(np.sum(diff * diff, axis=1)).astype(np.float32)
 
-        controller.configure_pretraining(
+        controller.configure_value_pretraining(
             state_sampler=state_sampler,
             target_function=target_function,
-            config=MemoryPretrainConfig(
+            config=ValuePretrainConfig(
                 sample_count=pretrain_sample_count,
                 epochs=pretrain_epochs,
                 batch_size=pretrain_batch_size,
@@ -169,7 +169,7 @@ def main():
                 print_every=pretrain_print_every,
             ),
         )
-        controller.pretrained_weights_key = weights_key
+        controller.pretrained_value_key = weights_key
 
         WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
         weights_path = WEIGHTS_DIR / f"{weights_key}.pt"
@@ -180,8 +180,8 @@ def main():
                     f"Pretrained weights not found at {weights_path}. "
                     "Run with --pretrain-mode train to generate them."
                 )
-            controller.load_pretrained_weights(weights_path)
-            print(f"Loaded pretrained memory weights from {weights_path}")
+            controller.load_pretrained_value_weights(weights_path)
+            print(f"Loaded pretrained learned value weights from {weights_path}")
         else:  # train
             if weights_path.exists():
                 print(
@@ -189,18 +189,18 @@ def main():
                     "Training from scratch — existing file will NOT be overwritten. "
                     "Delete it manually to save new weights."
                 )
-            if not controller.pretrain_memory(verbose=True):
-                raise RuntimeError("Memory pretraining callbacks were not configured.")
+            if not controller.pretrain_learned_value(verbose=True):
+                raise RuntimeError("Value pretraining callbacks were not configured.")
             if not weights_path.exists():
-                controller.save_pretrained_weights(weights_path)
-                print(f"Saved pretrained memory weights to {weights_path}")
+                controller.save_pretrained_value_weights(weights_path)
+                print(f"Saved pretrained learned value weights to {weights_path}")
 
     else:  # mppi
         controller = MPPI(**shared)
 
-    # ── Memory visualization setup ─────────────────────────────────────
+    # ── Learned value visualization setup ────────────────────────────────
     vis_fn = None
-    if visualize and args.controller in ("memory", "memory_staged"):
+    if visualize and args.controller in ("learned_value", "density_learned_value"):
         vis_dir = Path(__file__).resolve().parents[1] / "visualize" / "ant"
 
         def _plot_overlay(ax):
@@ -227,7 +227,7 @@ def main():
             ))
 
         def _vis_fn(ctrl, step):
-            visualize_memory(
+            visualize_learned_value(
                 ctrl, step,
                 output_dir=vis_dir,
                 plot_overlay=_plot_overlay,

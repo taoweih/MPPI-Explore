@@ -199,7 +199,7 @@ class MPPI:
     def _launch_terminal_cost(self, out_wp: wp.array) -> None:
         """Write terminal cost for all worlds into out_wp.
 
-        Override in subclasses to modify terminal cost (e.g. memory blend).
+        Override in subclasses to modify terminal cost (e.g. value blend).
         """
         self.task.launch_terminal_cost(self.warp_data, out_wp)
 

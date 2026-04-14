@@ -387,17 +387,17 @@ class SeniorThesisBenchmarkSuite:
             return num_jobs
         return min(int(self.config.max_workers), num_jobs)
 
-    def _pretrain_all_memory(
+    def _pretrain_all_learned_value(
         self,
         controller_factory: Callable[[ControllerSpec, object, float], object],
     ) -> None:
-        """Pre-train all memory controllers sequentially before parallel runs."""
+        """Pre-train all learned value controllers sequentially before parallel runs."""
         for spec in self.controller_specs:
-            if not any(kw in spec.name.lower() for kw in ("memory",)):
+            if not any(kw in spec.name.lower() for kw in ("value",)):
                 continue
             task = self.task_factory()
             controller = controller_factory(spec, task, 1.0)
-            weights_path = self._memory_weights_path(controller, spec)
+            weights_path = self._learned_value_weights_path(controller, spec)
             if weights_path is not None and weights_path.exists():
                 continue
             print(f"Pre-training {spec.name} before parallel runs...")
@@ -626,8 +626,8 @@ class SeniorThesisBenchmarkSuite:
                     )
 
         else:
-            # Pre-train memory controllers sequentially to avoid races.
-            self._pretrain_all_memory(controller_factory)
+            # Pre-train learned value controllers sequentially to avoid races.
+            self._pretrain_all_learned_value(controller_factory)
 
             script_path = os.path.abspath(sys.argv[0])
             sweep_horizon = float(self.config.sweep_horizon_for_samples)
@@ -749,21 +749,21 @@ class SeniorThesisBenchmarkSuite:
         )
 
     def _prepare_controller(self, controller: object, spec: ControllerSpec) -> None:
-        if not hasattr(controller, "pretrain_memory"):
+        if not hasattr(controller, "pretrain_learned_value"):
             return
 
-        weights_path = self._memory_weights_path(controller, spec)
+        weights_path = self._learned_value_weights_path(controller, spec)
         if weights_path is not None and weights_path.exists():
-            print(f"Loading pretrained memory weights from {weights_path}")
-            controller.load_pretrained_weights(weights_path)
+            print(f"Loading pretrained learned value weights from {weights_path}")
+            controller.load_pretrained_value_weights(weights_path)
             return
 
-        trained = controller.pretrain_memory(verbose=True)
+        trained = controller.pretrain_learned_value(verbose=True)
         if trained and weights_path is not None:
-            controller.save_pretrained_weights(weights_path)
-            print(f"Saved pretrained memory weights to {weights_path}")
+            controller.save_pretrained_value_weights(weights_path)
+            print(f"Saved pretrained learned value weights to {weights_path}")
 
-    def _memory_weights_path(
+    def _learned_value_weights_path(
         self,
         controller: object,
         spec: ControllerSpec,
@@ -774,7 +774,7 @@ class SeniorThesisBenchmarkSuite:
         weights_dir = Path(self.config.pretrain_weights_dir)
         weights_dir.mkdir(parents=True, exist_ok=True)
 
-        key = getattr(controller, "pretrained_weights_key", None)
+        key = getattr(controller, "pretrained_value_key", None)
         if key is None:
             key = f"{self.task_name}_{spec.name}"
         return weights_dir / f"{self._slugify(str(key))}.pt"

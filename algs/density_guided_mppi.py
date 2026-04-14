@@ -1,4 +1,4 @@
-"""MPPI with staged rollout and KDE-based resampling (fully GPU graph-captured)."""
+"""Density-guided MPPI with KDE-based resampling (fully GPU graph-captured)."""
 
 import math
 
@@ -23,14 +23,14 @@ from utils.warp_kernels import (
 )
 
 
-class MPPIStagedRollout:
-    """MPPI with staged rollout and KDE resampling.
+class DensityGuidedMPPI:
+    """Density-guided MPPI with KDE-based resampling.
 
     Splits the planning horizon into stages. After each stage, computes a KDE
     over reached states and resamples trajectories inversely proportional to
     density to encourage state-space exploration.
 
-    The entire staged rollout — including KDE density computation,
+    The entire density-guided rollout — including KDE density computation,
     systematic resampling, state reshuffling, knot regeneration, and
     zero-order interpolation — is captured as a single CUDA graph.
     The only GPU-CPU syncs are the initial data upload (before graph
@@ -201,14 +201,14 @@ class MPPIStagedRollout:
 
         # CUDA graphs (built lazily).
         self._rollout_graph: Optional[wp.Graph] = None
-        self._staged_graph: Optional[wp.Graph] = None
+        self._density_graph: Optional[wp.Graph] = None
 
     # ------------------------------------------------------------------
     # CUDA graph builders
     # ------------------------------------------------------------------
 
     def _build_rollout_graph(self) -> None:
-        """Non-staged fallback: step + cost in one graph."""
+        """Non-density fallback: step + cost in one graph."""
         wp.capture_begin(force_module_load=False)
         try:
             self._running_costs_wp.zero_()
@@ -241,8 +241,8 @@ class MPPIStagedRollout:
                         self._state_source_start, self.state_dim],
             )
 
-    def _build_staged_graph(self) -> None:
-        """Capture the full staged rollout as a single CUDA graph."""
+    def _build_density_graph(self) -> None:
+        """Capture the full density-guided rollout as a single CUDA graph."""
         N = self.num_samples
         nu = self.task.nu
 
@@ -337,7 +337,7 @@ class MPPIStagedRollout:
             self._terminal_costs_wp.zero_()
             self.task.launch_terminal_cost(self.warp_data, self._terminal_costs_wp)
 
-            self._staged_graph = wp.capture_end()
+            self._density_graph = wp.capture_end()
         except Exception:
             wp.capture_end()
             raise
@@ -441,17 +441,17 @@ class MPPIStagedRollout:
     # ------------------------------------------------------------------
 
     def _rollout(self, controls: np.ndarray) -> np.ndarray:
-        """Non-staged GPU rollout via CUDA graph."""
+        """Non-density GPU rollout via CUDA graph."""
         self._controls_wp.assign(controls)
         if self._rollout_graph is None:
             self._build_rollout_graph()
         wp.capture_launch(self._rollout_graph)
         return self._running_costs_wp.numpy() + self._terminal_costs_wp.numpy()
 
-    def _staged_rollout(
+    def _density_rollout(
         self, controls: np.ndarray, knots: np.ndarray,
     ) -> np.ndarray:
-        """Staged rollout via CUDA graph with GPU-native KDE resampling."""
+        """Density-guided rollout via CUDA graph with GPU-native KDE resampling."""
         if self._num_stages <= 1:
             return self._rollout(controls)
 
@@ -478,9 +478,9 @@ class MPPIStagedRollout:
                 buf.assign(noise)
 
         # Build graph lazily, then replay.
-        if self._staged_graph is None:
-            self._build_staged_graph()
-        wp.capture_launch(self._staged_graph)
+        if self._density_graph is None:
+            self._build_density_graph()
+        wp.capture_launch(self._density_graph)
 
         costs = self._running_costs_wp.numpy() + self._terminal_costs_wp.numpy()
         final_knots = self._knots_wp.numpy()
@@ -506,14 +506,14 @@ class MPPIStagedRollout:
 
         if self.iterations == 1:
             knots, controls = self._sample_knots()
-            costs, final_knots = self._staged_rollout(controls, knots)
+            costs, final_knots = self._density_rollout(controls, knots)
             self._update_weights(costs, final_knots)
         else:
             init_state = self._make_initial_state(mj_data)
             for _ in range(self.iterations):
                 self._restore_state(init_state)
                 knots, controls = self._sample_knots()
-                costs, final_knots = self._staged_rollout(controls, knots)
+                costs, final_knots = self._density_rollout(controls, knots)
                 self._update_weights(costs, final_knots)
 
         return self.mean
