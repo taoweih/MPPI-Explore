@@ -12,6 +12,82 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 
 
+# ── Rollout trajectory extraction ────────────────────────────────────────
+
+def _rollout_trajectories_cpu(
+    controller,
+    mj_model,
+    mj_data,
+    num_rollouts: int,
+    state_indices: Sequence[int] = (0, 1),
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Re-roll out a subset of the last sampled controls on CPU.
+
+    Returns
+    -------
+    trajectories : (num_rollouts, ctrl_steps+1, len(state_indices))
+        XY (or chosen state dims) positions at each timestep.
+    total_costs : (num_rollouts,)
+        Total cost for each rollout.
+    best_idx : int
+        Index into the returned arrays of the lowest-cost trajectory.
+    """
+    import mujoco as mj
+
+    controls_all = controller._controls_wp.numpy()  # (N, T, nu)
+    costs_all = (
+        controller._running_costs_wp.numpy()
+        + controller._terminal_costs_wp.numpy()
+    )  # (N,)
+
+    N = controls_all.shape[0]
+    num_rollouts = min(num_rollouts, N)
+
+    # Choose a random subset, but always include the best trajectory.
+    best_global = int(np.argmin(costs_all))
+    rng = np.random.default_rng()
+    pool = np.setdiff1d(np.arange(N), [best_global])
+    chosen = rng.choice(pool, size=max(num_rollouts - 1, 0), replace=False)
+    sample_indices = np.concatenate([[best_global], chosen])
+
+    T = controls_all.shape[1]
+    D = len(state_indices)
+    trajectories = np.zeros((len(sample_indices), T + 1, D), dtype=np.float32)
+    total_costs = costs_all[sample_indices]
+
+    # Find which returned index corresponds to the best trajectory.
+    best_idx = 0  # we put it first
+
+    sim_dt = mj_model.opt.timestep
+    planning_dt = controller.dt
+    sim_steps_per_ctrl = max(int(round(planning_dt / sim_dt)), 1)
+
+    tmp_data = mj.MjData(mj_model)
+
+    for ri, si in enumerate(sample_indices):
+        # Reset to current state.
+        tmp_data.qpos[:] = mj_data.qpos
+        tmp_data.qvel[:] = mj_data.qvel
+        tmp_data.ctrl[:] = mj_data.ctrl
+        tmp_data.time = mj_data.time
+        if mj_data.mocap_pos.shape[0] > 0:
+            tmp_data.mocap_pos[:] = mj_data.mocap_pos
+            tmp_data.mocap_quat[:] = mj_data.mocap_quat
+        mj.mj_forward(mj_model, tmp_data)
+
+        for d, si_d in enumerate(state_indices):
+            trajectories[ri, 0, d] = tmp_data.qpos[si_d]
+
+        for t in range(T):
+            tmp_data.ctrl[:] = controls_all[si, t]
+            for _ in range(sim_steps_per_ctrl):
+                mj.mj_step(mj_model, tmp_data)
+            for d, si_d in enumerate(state_indices):
+                trajectories[ri, t + 1, d] = tmp_data.qpos[si_d]
+
+    return trajectories, total_costs, best_idx
+
+
 def visualize_learned_value(
     controller,
     step: int,
@@ -23,6 +99,17 @@ def visualize_learned_value(
     vmax: Optional[float] = None,
     xlim: Optional[tuple[float, float]] = None,
     ylim: Optional[tuple[float, float]] = None,
+    # ── Rollout visualization ──
+    mj_model=None,
+    mj_data=None,
+    num_rollout_samples: int = 100,
+    rollout_state_indices: Sequence[int] = (0, 1),
+    rollout_color: str = "black",
+    rollout_alpha: float = 0.15,
+    rollout_linewidth: float = 0.5,
+    best_rollout_color: str = "purple",
+    best_rollout_alpha: float = 0.9,
+    best_rollout_linewidth: float = 2.0,
 ) -> None:
     """Render the controller's learned value as a 2D heatmap and save to disk.
 
@@ -43,6 +130,25 @@ def visualize_learned_value(
         Color scale limits for the heatmap.
     xlim, ylim:
         Optional (min, max) tuples to crop the view. Defaults to full grid.
+    mj_model, mj_data:
+        If both provided, rollout trajectories are drawn on the heatmap.
+    num_rollout_samples:
+        Number of sampled rollouts to draw (randomly chosen from the last
+        optimize batch). The best (lowest-cost) trajectory is always included.
+    rollout_state_indices:
+        Which qpos indices map to (x, y) on the plot.
+    rollout_color:
+        Color of the sampled rollout lines.
+    rollout_alpha:
+        Transparency of the sampled rollout lines.
+    rollout_linewidth:
+        Line width of the sampled rollout lines.
+    best_rollout_color:
+        Color of the lowest-cost trajectory.
+    best_rollout_alpha:
+        Transparency of the lowest-cost trajectory.
+    best_rollout_linewidth:
+        Line width of the lowest-cost trajectory.
     """
     lv = controller.learned_value
     x0, x1 = xlim if xlim is not None else (lv.grid_min, lv.grid_max)
@@ -68,6 +174,30 @@ def visualize_learned_value(
         vmax=vmax,
     )
     fig.colorbar(im, ax=ax, label="Value")
+
+    # ── Draw rollout trajectories ──
+    if mj_model is not None and mj_data is not None and num_rollout_samples > 0:
+        trajs, costs, best_idx = _rollout_trajectories_cpu(
+            controller, mj_model, mj_data,
+            num_rollouts=num_rollout_samples,
+            state_indices=rollout_state_indices,
+        )
+        # Draw sampled rollouts.
+        for i in range(trajs.shape[0]):
+            if i == best_idx:
+                continue
+            ax.plot(
+                trajs[i, :, 0], trajs[i, :, 1],
+                color=rollout_color, alpha=rollout_alpha,
+                linewidth=rollout_linewidth, zorder=2,
+            )
+        # Draw best trajectory on top.
+        ax.plot(
+            trajs[best_idx, :, 0], trajs[best_idx, :, 1],
+            color=best_rollout_color, alpha=best_rollout_alpha,
+            linewidth=best_rollout_linewidth, zorder=3,
+            label="Best rollout",
+        )
 
     if plot_overlay is not None:
         plot_overlay(ax)

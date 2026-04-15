@@ -39,7 +39,7 @@ def main():
     args = parser.parse_args()
 
     # ── Shared MPPI parameters ──────────────────────────────────────────
-    num_samples = 514
+    num_samples = 512
     noise_level = 3.0
     temperature = 0.001
     plan_horizon = 0.2
@@ -86,7 +86,7 @@ def main():
 
     # ── Simulation parameters ───────────────────────────────────────────
     frequency = 50.0
-    max_steps = 5001
+    max_steps = 1001
     show_traces = True
     record_video = False
 
@@ -215,12 +215,14 @@ def main():
             ax.add_patch(patches.Circle(
                 (goal_xy[0], goal_xy[1]), 0.01,
                 edgecolor="black", facecolor="red", linewidth=0.5, label="Goal",
+                zorder=5,
             ))
             # Current point mass position (radius 0.01 from point_mass.xml)
             pm_pos = mj_data.xpos[task.end_effector_pos_id, :2]
             ax.add_patch(patches.Circle(
                 (pm_pos[0], pm_pos[1]), 0.01,
                 edgecolor="black", facecolor="lime", linewidth=0.5, label="Point Mass",
+                zorder=6,
             ))
 
         def _vis_fn(ctrl, step):
@@ -229,6 +231,13 @@ def main():
                 output_dir=vis_dir,
                 plot_overlay=_plot_overlay,
                 vmin=0, vmax=2,
+                mj_model=mj_model,
+                mj_data=mj_data,
+                num_rollout_samples=50,
+                rollout_color="black",
+                rollout_alpha=0.12,
+                best_rollout_color="purple",
+                best_rollout_linewidth=1.5,
             )
 
         vis_fn = _vis_fn
