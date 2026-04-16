@@ -149,6 +149,7 @@ def main():
             num_knots_per_stage=num_knots_per_stage,
             kde_bandwidth=kde_bandwidth,
             inverse_density_power=inverse_density_power,
+            disable_replay_anchors=True,
         )
 
         def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:

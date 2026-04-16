@@ -136,6 +136,7 @@ def _learned_value_controller(
         num_knots_per_stage=NUM_KNOTS_PER_STAGE,
         kde_bandwidth=KDE_BANDWIDTH,
         inverse_density_power=INVERSE_DENSITY_POWER,
+        disable_replay_anchors=True,
     )
 
     def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:

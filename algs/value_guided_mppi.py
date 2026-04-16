@@ -447,6 +447,7 @@ class ValueGuidedMPPI:
         goal_value: float = 0.0,
         goal_weight: float = 200000.0,
         auto_pretrain_value: bool = False,
+        disable_replay_anchors: bool = True,
     ) -> None:
         if spline_type != "zero":
             raise NotImplementedError(
@@ -633,6 +634,7 @@ class ValueGuidedMPPI:
         )
         self.goal_value = float(goal_value)
         self.goal_weight = float(goal_weight)
+        self.disable_replay_anchors = bool(disable_replay_anchors)
 
         self.auto_pretrain_value = auto_pretrain_value
         self.learned_value_ready = False
@@ -1138,22 +1140,23 @@ class ValueGuidedMPPI:
             np.full(states.shape[0], self.online_new_state_weight, dtype=np.float32),
         ]
 
-        if self.online_anchor_samples > 0:
-            anchors = self.rng.uniform(
-                self.learned_value.grid_min,
-                self.learned_value.grid_max,
-                size=(self.online_anchor_samples, self.state_dim),
-            ).astype(np.float32)
-            anchor_targets = self.learned_value.predict(anchors)
-            all_states.append(anchors)
-            all_targets.append(anchor_targets)
-            all_weights.append(
-                np.full(anchors.shape[0], self.online_anchor_weight, dtype=np.float32),
-            )
-        if self.goal_state is not None:
-            all_states.append(self.goal_state)
-            all_targets.append(np.array([self.goal_value], dtype=np.float32))
-            all_weights.append(np.array([self.goal_weight], dtype=np.float32))
+        if not self.disable_replay_anchors:
+            if self.online_anchor_samples > 0:
+                anchors = self.rng.uniform(
+                    self.learned_value.grid_min,
+                    self.learned_value.grid_max,
+                    size=(self.online_anchor_samples, self.state_dim),
+                ).astype(np.float32)
+                anchor_targets = self.learned_value.predict(anchors)
+                all_states.append(anchors)
+                all_targets.append(anchor_targets)
+                all_weights.append(
+                    np.full(anchors.shape[0], self.online_anchor_weight, dtype=np.float32),
+                )
+            if self.goal_state is not None:
+                all_states.append(self.goal_state)
+                all_targets.append(np.array([self.goal_value], dtype=np.float32))
+                all_weights.append(np.array([self.goal_weight], dtype=np.float32))
 
         self.learned_value.fit_online(
             np.concatenate(all_states, axis=0),
