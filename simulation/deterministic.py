@@ -112,6 +112,59 @@ def _predict_nominal_traces(
     return np.stack(trace_frames, axis=1)
 
 
+def _save_screenshot(
+    mj_model: mujoco.MjModel,
+    mj_data: mujoco.MjData,
+    screenshot_path: str,
+    dpi: int,
+    width: int,
+    height: int,
+    fixed_camera_id: Optional[int],
+    camera_distance: Optional[float],
+    camera_azimuth: Optional[float],
+    camera_elevation: Optional[float],
+    camera_lookat: Optional[Sequence[float]],
+) -> None:
+    """Render one frame offscreen at high resolution and save as a PNG with DPI metadata."""
+    from PIL import Image
+
+    shot_cam = mujoco.MjvCamera()
+    mujoco.mjv_defaultFreeCamera(mj_model, shot_cam)
+    if fixed_camera_id is not None:
+        shot_cam.fixedcamid = fixed_camera_id
+        shot_cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+    else:
+        if camera_distance is not None:
+            shot_cam.distance = float(camera_distance)
+        if camera_azimuth is not None:
+            shot_cam.azimuth = float(camera_azimuth)
+        if camera_elevation is not None:
+            shot_cam.elevation = float(camera_elevation)
+        if camera_lookat is not None:
+            shot_cam.lookat[:] = np.asarray(camera_lookat, dtype=np.float64)
+
+    prev_offwidth = mj_model.vis.global_.offwidth
+    prev_offheight = mj_model.vis.global_.offheight
+    mj_model.vis.global_.offwidth = max(int(width), int(prev_offwidth))
+    mj_model.vis.global_.offheight = max(int(height), int(prev_offheight))
+    try:
+        renderer = mujoco.Renderer(mj_model, height=int(height), width=int(width))
+        try:
+            renderer.update_scene(mj_data, shot_cam)
+            pixels = renderer.render()
+        finally:
+            renderer.close()
+    finally:
+        mj_model.vis.global_.offwidth = prev_offwidth
+        mj_model.vis.global_.offheight = prev_offheight
+
+    out_dir = os.path.dirname(os.path.abspath(screenshot_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    Image.fromarray(pixels).save(screenshot_path, dpi=(int(dpi), int(dpi)))
+    print(f"Saved screenshot to {screenshot_path}")
+
+
 def run_interactive(
     controller,
     mj_model: mujoco.MjModel,
@@ -126,7 +179,20 @@ def run_interactive(
     video_output_dir: Optional[str] = None,
     video_width: int = 720,
     video_height: int = 480,
+    video_crf: int = 2,
+    video_preset: str = "slow",
     fixed_camera_id: Optional[int] = None,
+    camera_distance: Optional[float] = None,
+    camera_azimuth: Optional[float] = None,
+    camera_elevation: Optional[float] = None,
+    camera_lookat: Optional[Sequence[float]] = None,
+    take_screenshot: bool = False,
+    screenshot_path: Optional[str] = None,
+    screenshot_dpi: int = 600,
+    screenshot_width: int = 2400,
+    screenshot_height: int = 2400,
+    screenshot_step: int = 0,
+    screenshot_every: int = 0,
     visualize_fn: Optional[Callable] = None,
     visualize_every: int = 50,
 ) -> list[float]:
@@ -155,6 +221,23 @@ def run_interactive(
     controller.optimize(mj_data)
     print(f"Warm-up took {time.time() - st:.3f}s")
 
+    screenshot_pending = bool(take_screenshot and screenshot_path is not None)
+    if screenshot_pending and screenshot_step <= 0:
+        _save_screenshot(
+            mj_model=mj_model,
+            mj_data=mj_data,
+            screenshot_path=screenshot_path,
+            dpi=screenshot_dpi,
+            width=screenshot_width,
+            height=screenshot_height,
+            fixed_camera_id=fixed_camera_id,
+            camera_distance=camera_distance,
+            camera_azimuth=camera_azimuth,
+            camera_elevation=camera_elevation,
+            camera_lookat=camera_lookat,
+        )
+        screenshot_pending = False
+
     recorder = None
     renderer = None
     if record_video:
@@ -164,6 +247,8 @@ def run_interactive(
             width=video_width,
             height=video_height,
             fps=actual_frequency,
+            crf=video_crf,
+            preset=video_preset,
         )
         if recorder.start():
             mj_model.vis.global_.offwidth = video_width
@@ -182,6 +267,15 @@ def run_interactive(
         if fixed_camera_id is not None:
             viewer.cam.fixedcamid = fixed_camera_id
             viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+        else:
+            if camera_distance is not None:
+                viewer.cam.distance = float(camera_distance)
+            if camera_azimuth is not None:
+                viewer.cam.azimuth = float(camera_azimuth)
+            if camera_elevation is not None:
+                viewer.cam.elevation = float(camera_elevation)
+            if camera_lookat is not None:
+                viewer.cam.lookat[:] = np.asarray(camera_lookat, dtype=np.float64)
 
         if show_traces:
             num_trace_entities = (
@@ -238,6 +332,45 @@ def run_interactive(
 
             viewer.sync()
 
+            if screenshot_pending and step_idx + 1 >= screenshot_step:
+                _save_screenshot(
+                    mj_model=mj_model,
+                    mj_data=mj_data,
+                    screenshot_path=screenshot_path,
+                    dpi=screenshot_dpi,
+                    width=screenshot_width,
+                    height=screenshot_height,
+                    fixed_camera_id=fixed_camera_id,
+                    camera_distance=camera_distance,
+                    camera_azimuth=camera_azimuth,
+                    camera_elevation=camera_elevation,
+                    camera_lookat=camera_lookat,
+                )
+                screenshot_pending = False
+
+            if (
+                screenshot_every > 0
+                and screenshot_path is not None
+                and (step_idx + 1) % screenshot_every == 0
+            ):
+                base, ext = os.path.splitext(screenshot_path)
+                if not ext:
+                    ext = ".png"
+                periodic_path = f"{base}_step_{step_idx + 1}{ext}"
+                _save_screenshot(
+                    mj_model=mj_model,
+                    mj_data=mj_data,
+                    screenshot_path=periodic_path,
+                    dpi=screenshot_dpi,
+                    width=screenshot_width,
+                    height=screenshot_height,
+                    fixed_camera_id=fixed_camera_id,
+                    camera_distance=camera_distance,
+                    camera_azimuth=camera_azimuth,
+                    camera_elevation=camera_elevation,
+                    camera_lookat=camera_lookat,
+                )
+
             if recorder is not None and recorder.is_recording and renderer is not None:
                 if fixed_camera_id is None:
                     renderer.update_scene(mj_data, viewer.cam)
@@ -259,6 +392,16 @@ def run_interactive(
 
             if not viewer.is_running():
                 break
+
+        if fixed_camera_id is None:
+            lx, ly, lz = viewer.cam.lookat
+            print(
+                f"\nFinal free-camera state (paste into example):\n"
+                f"    camera_lookat = ({lx:.3f}, {ly:.3f}, {lz:.3f})\n"
+                f"    camera_distance = {viewer.cam.distance:.3f}\n"
+                f"    camera_azimuth = {viewer.cam.azimuth:.1f}\n"
+                f"    camera_elevation = {viewer.cam.elevation:.1f}"
+            )
 
     if recorder is not None:
         recorder.stop()

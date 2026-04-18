@@ -82,13 +82,33 @@ def main():
 
     # ── Visualization parameters ───────────────────────────────────────
     visualize = True
-    visualize_every = 50
+    visualize_every = 10
 
     # ── Simulation parameters ───────────────────────────────────────────
     frequency = 50.0
     max_steps = 1001
-    show_traces = True
-    record_video = False
+    show_traces = False
+    record_video = True
+
+    # ── Video quality (only used when record_video=True) ────────────────
+    video_width = 1080
+    video_height = 1080
+    video_crf = 18       # 0 = lossless, 18 ≈ visually lossless, 23 = default H.264, 28 = small file
+    video_preset = "slow"  # ultrafast, fast, medium, slow, veryslow
+
+    # ── Camera parameters (top-down view over U obstacle) ───────────────
+    camera_lookat = (0.016, 0.300, -0.211)
+    camera_distance = 2.702
+    camera_azimuth = 89.9
+    camera_elevation = -89.0
+
+    # ── Screenshot parameters ──────────────────────────────────────────
+    take_screenshot = True
+    screenshot_path = str(
+        Path(__file__).resolve().parents[1] / "visualize" / "u_point_mass" / "u_point_mass.png"
+    )
+    screenshot_dpi = 600
+    screenshot_every = 50  # also capture every N steps as <task>_step_<N>.png
 
     # ── Task setup ──────────────────────────────────────────────────────
     task = UPointMass()
@@ -251,7 +271,19 @@ def main():
         frequency=frequency,
         show_traces=show_traces,
         record_video=record_video,
+        video_width=video_width,
+        video_height=video_height,
+        video_crf=video_crf,
+        video_preset=video_preset,
         max_steps=max_steps,
+        camera_lookat=camera_lookat,
+        camera_distance=camera_distance,
+        camera_azimuth=camera_azimuth,
+        camera_elevation=camera_elevation,
+        take_screenshot=take_screenshot,
+        screenshot_path=screenshot_path,
+        screenshot_dpi=screenshot_dpi,
+        screenshot_every=screenshot_every,
         visualize_fn=vis_fn,
         visualize_every=visualize_every,
     )

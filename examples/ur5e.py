@@ -85,9 +85,29 @@ def main():
 
     # ── Simulation parameters ───────────────────────────────────────────
     frequency = 50.0
-    max_steps = 500
-    show_traces = True
-    record_video = False
+    max_steps = 1000
+    show_traces = False
+    record_video = True
+
+    # ── Video quality (only used when record_video=True) ────────────────
+    video_width = 1080
+    video_height = 1080
+    video_crf = 18       # 0 = lossless, 18 ≈ visually lossless, 23 = default H.264, 28 = small file
+    video_preset = "slow"  # ultrafast, fast, medium, slow, veryslow
+
+    # ── Camera parameters (matches scene.xml <global> + <statistic>) ────
+    camera_lookat = (-0.093, 0.274, 0.251)
+    camera_distance = 2.480
+    camera_azimuth = 55.4
+    camera_elevation = -52.7
+
+    # ── Screenshot parameters ──────────────────────────────────────────
+    take_screenshot = True
+    screenshot_path = str(
+        Path(__file__).resolve().parents[1] / "visualize" / "ur5e" / "ur5e.png"
+    )
+    screenshot_dpi = 600
+    screenshot_every = 50  # also capture every N steps as <task>_step_<N>.png
 
     # ── Task setup ──────────────────────────────────────────────────────
     task = UR5e()
@@ -243,7 +263,19 @@ def main():
         frequency=frequency,
         show_traces=show_traces,
         record_video=record_video,
+        video_width=video_width,
+        video_height=video_height,
+        video_crf=video_crf,
+        video_preset=video_preset,
         max_steps=max_steps,
+        camera_lookat=camera_lookat,
+        camera_distance=camera_distance,
+        camera_azimuth=camera_azimuth,
+        camera_elevation=camera_elevation,
+        take_screenshot=take_screenshot,
+        screenshot_path=screenshot_path,
+        screenshot_dpi=screenshot_dpi,
+        screenshot_every=screenshot_every,
         visualize_fn=vis_fn,
         visualize_every=visualize_every,
     )

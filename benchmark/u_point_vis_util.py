@@ -23,8 +23,8 @@ import numpy as np
 VIS_DIR = Path(__file__).resolve().parents[1] / "visualize" / "u_point_mass"
 OUT_DIR = Path(__file__).resolve().parent / "benchmark_data" / "thesis_plots"
 
-# Steps to extract (0 to 750, 4 evenly spaced)
-STEPS = [0, 250, 500, 750]
+# Steps to extract
+STEPS = [0, 200, 400, 600, 640, 660, 680, 720]
 
 # Frequency (steps -> seconds)
 FREQUENCY = 50.0  # Hz
@@ -120,7 +120,7 @@ def main():
         # Time label
         t_sec = step * step_dt
         ax.text(
-            0.5, 0.03, f"t = {t_sec:.0f}s",
+            0.5, 0.03, f"t = {t_sec:.1f}s",
             transform=ax.transAxes,
             ha="center", va="bottom",
             fontsize=14, fontfamily="serif",
@@ -129,7 +129,7 @@ def main():
         )
 
         fig.tight_layout(pad=0)
-        out_path = OUT_DIR / f"u_point_mass_learned_value_t{t_sec:.0f}s.png"
+        out_path = OUT_DIR / f"u_point_mass_learned_value_t{t_sec:.1f}s.png"
         fig.savefig(out_path, dpi=600, bbox_inches="tight", pad_inches=0.02)
         plt.close(fig)
         print(f"Saved: {out_path}")

@@ -17,11 +17,15 @@ class VideoRecorder:
         width: int = 720,
         height: int = 480,
         fps: float = 30.0,
+        crf: int = 2,
+        preset: str = "slow",
     ) -> None:
         self.output_dir = output_dir
         self.width = width
         self.height = height
         self.fps = fps
+        self.crf = int(crf)
+        self.preset = preset
 
         self.ffmpeg_process: Optional[subprocess.Popen] = None
         self.video_path: Optional[str] = None
@@ -70,9 +74,9 @@ class VideoRecorder:
             "-vcodec",
             "h264",
             "-crf",
-            "2",
+            str(self.crf),
             "-preset",
-            "slow",
+            self.preset,
             "-movflags",
             "+faststart",
             "-pix_fmt",

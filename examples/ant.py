@@ -87,8 +87,29 @@ def main():
     # ── Simulation parameters ───────────────────────────────────────────
     frequency = 50.0
     max_steps = 5001
-    show_traces = True
-    record_video = False
+    show_traces = False
+    record_video = True
+
+    # ── Video quality (only used when record_video=True) ────────────────
+    video_width = 1080
+    video_height = 1080
+    video_crf = 18       # 0 = lossless, 18 ≈ visually lossless, 23 = default H.264, 28 = small file
+    video_preset = "slow"  # ultrafast, fast, medium, slow, veryslow
+
+    # ── Camera parameters (third-person, behind ant looking toward goal) ─
+    camera_lookat = (3.354, 2.566, -0.515)
+    camera_distance = 16.108
+    camera_azimuth = 45.0
+    camera_elevation = -49.3
+
+    # ── Screenshot parameters ──────────────────────────────────────────
+    take_screenshot = True
+    screenshot_path = str(
+        Path(__file__).resolve().parents[1] / "visualize" / "ant" / "ant.png"
+    )
+    screenshot_dpi = 600
+    screenshot_step = 20  # delay capture so the ant settles onto the ground
+    screenshot_every = 50  # also capture every N steps as <task>_step_<N>.png
 
     # ── Task setup ──────────────────────────────────────────────────────
     task = Ant()
@@ -247,7 +268,20 @@ def main():
         frequency=frequency,
         show_traces=show_traces,
         record_video=record_video,
+        video_width=video_width,
+        video_height=video_height,
+        video_crf=video_crf,
+        video_preset=video_preset,
         max_steps=max_steps,
+        camera_lookat=camera_lookat,
+        camera_distance=camera_distance,
+        camera_azimuth=camera_azimuth,
+        camera_elevation=camera_elevation,
+        take_screenshot=take_screenshot,
+        screenshot_path=screenshot_path,
+        screenshot_dpi=screenshot_dpi,
+        screenshot_step=screenshot_step,
+        screenshot_every=screenshot_every,
         visualize_fn=vis_fn,
         visualize_every=visualize_every,
     )
