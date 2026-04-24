@@ -18,7 +18,7 @@ from algs import (
 )
 from simulation.deterministic import run_interactive
 from tasks.ant import Ant
-from utils.visualize_learned_value import visualize_learned_value
+from utils.visualize_learned_value import visualize_learned_value, visualize_rollouts
 
 WEIGHTS_DIR = (
     Path(__file__).resolve().parents[1]
@@ -81,7 +81,7 @@ def main():
     pretrain_target_scale = 1.0
 
     # ── Visualization parameters ───────────────────────────────────────
-    visualize = True
+    visualize = False
     visualize_every = 500
 
     # ── Simulation parameters ───────────────────────────────────────────
@@ -103,7 +103,7 @@ def main():
     camera_elevation = -49.3
 
     # ── Screenshot parameters ──────────────────────────────────────────
-    take_screenshot = True
+    take_screenshot = False
     screenshot_path = str(
         Path(__file__).resolve().parents[1] / "visualize" / "ant" / "ant.png"
     )
@@ -220,9 +220,9 @@ def main():
     else:  # mppi
         controller = MPPI(**shared)
 
-    # ── Learned value visualization setup ────────────────────────────────
+    # ── Visualization setup ──────────────────────────────────────────────
     vis_fn = None
-    if visualize and args.controller in ("learned_value", "density_learned_value"):
+    if visualize:
         vis_dir = Path(__file__).resolve().parents[1] / "visualize" / "ant"
 
         def _plot_overlay(ax):
@@ -248,15 +248,27 @@ def main():
                 edgecolor="black", facecolor="lime", linewidth=0.5, label="Ant",
             ))
 
-        def _vis_fn(ctrl, step):
-            visualize_learned_value(
-                ctrl, step,
-                output_dir=vis_dir,
-                plot_overlay=_plot_overlay,
-                vmin=0, vmax=10,
-                xlim=(-1, 8),
-                ylim=(-1, 8),
-            )
+        if args.controller in ("learned_value", "density_learned_value"):
+            def _vis_fn(ctrl, step):
+                visualize_learned_value(
+                    ctrl, step,
+                    output_dir=vis_dir,
+                    plot_overlay=_plot_overlay,
+                    vmin=0, vmax=10,
+                    xlim=(-1, 8),
+                    ylim=(-1, 8),
+                )
+        else:
+            def _vis_fn(ctrl, step):
+                visualize_rollouts(
+                    ctrl, step,
+                    mj_model=mj_model,
+                    mj_data=mj_data,
+                    output_dir=vis_dir,
+                    plot_overlay=_plot_overlay,
+                    xlim=(-1, 8),
+                    ylim=(-1, 8),
+                )
 
         vis_fn = _vis_fn
 

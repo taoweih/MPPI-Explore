@@ -20,8 +20,13 @@ def _rollout_trajectories_cpu(
     mj_data,
     num_rollouts: int,
     state_indices: Sequence[int] = (0, 1),
+    site_id: Optional[int] = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Re-roll out a subset of the last sampled controls on CPU.
+
+    If ``site_id`` is given, positions are read from ``site_xpos[site_id]``
+    (along ``state_indices`` columns). Otherwise, positions are read from
+    ``qpos[state_indices]``.
 
     Returns
     -------
@@ -64,6 +69,11 @@ def _rollout_trajectories_cpu(
 
     tmp_data = mj.MjData(mj_model)
 
+    def _read_state(d: mj.MjData) -> np.ndarray:
+        if site_id is not None:
+            return d.site_xpos[site_id, list(state_indices)]
+        return np.asarray([d.qpos[si] for si in state_indices])
+
     for ri, si in enumerate(sample_indices):
         # Reset to current state.
         tmp_data.qpos[:] = mj_data.qpos
@@ -75,15 +85,13 @@ def _rollout_trajectories_cpu(
             tmp_data.mocap_quat[:] = mj_data.mocap_quat
         mj.mj_forward(mj_model, tmp_data)
 
-        for d, si_d in enumerate(state_indices):
-            trajectories[ri, 0, d] = tmp_data.qpos[si_d]
+        trajectories[ri, 0] = _read_state(tmp_data)
 
         for t in range(T):
             tmp_data.ctrl[:] = controls_all[si, t]
             for _ in range(sim_steps_per_ctrl):
                 mj.mj_step(mj_model, tmp_data)
-            for d, si_d in enumerate(state_indices):
-                trajectories[ri, t + 1, d] = tmp_data.qpos[si_d]
+            trajectories[ri, t + 1] = _read_state(tmp_data)
 
     return trajectories, total_costs, best_idx
 
@@ -104,6 +112,7 @@ def visualize_learned_value(
     mj_data=None,
     num_rollout_samples: int = 100,
     rollout_state_indices: Sequence[int] = (0, 1),
+    rollout_site_id: Optional[int] = None,
     rollout_color: str = "black",
     rollout_alpha: float = 0.15,
     rollout_linewidth: float = 0.5,
@@ -181,6 +190,7 @@ def visualize_learned_value(
             controller, mj_model, mj_data,
             num_rollouts=num_rollout_samples,
             state_indices=rollout_state_indices,
+            site_id=rollout_site_id,
         )
         # Draw sampled rollouts.
         for i in range(trajs.shape[0]):
@@ -441,4 +451,181 @@ def visualize_learned_value_3d_scatter(
 
     fig.tight_layout()
     fig.savefig(out_dir / f"learned_value_step_{step:05d}.png", dpi=150)
+    plt.close(fig)
+
+
+# ── Rollout-only visualizations (no value heatmap) ─────────────────────────
+
+
+def visualize_rollouts(
+    controller,
+    step: int,
+    *,
+    mj_model,
+    mj_data,
+    output_dir: str | Path,
+    plot_overlay: Optional[Callable[[plt.Axes], None]] = None,
+    xlim: Optional[tuple[float, float]] = None,
+    ylim: Optional[tuple[float, float]] = None,
+    num_rollout_samples: int = 100,
+    rollout_state_indices: Sequence[int] = (0, 1),
+    rollout_site_id: Optional[int] = None,
+    rollout_color: str = "black",
+    rollout_alpha: float = 0.15,
+    rollout_linewidth: float = 0.5,
+    best_rollout_color: str = "purple",
+    best_rollout_alpha: float = 0.9,
+    best_rollout_linewidth: float = 2.0,
+    file_prefix: str = "rollouts",
+    dpi: int = 1200,
+) -> None:
+    """Render MPPI rollout trajectories on a 2D plane (no value heatmap).
+
+    Uses the same rollout extraction as ``visualize_learned_value``.
+    The lowest-cost trajectory is drawn in ``best_rollout_color`` on top of
+    the other ``rollout_color`` samples.
+    """
+    if num_rollout_samples <= 0:
+        return
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    trajs, _, best_idx = _rollout_trajectories_cpu(
+        controller, mj_model, mj_data,
+        num_rollouts=num_rollout_samples,
+        state_indices=rollout_state_indices,
+        site_id=rollout_site_id,
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    for i in range(trajs.shape[0]):
+        if i == best_idx:
+            continue
+        ax.plot(
+            trajs[i, :, 0], trajs[i, :, 1],
+            color=rollout_color, alpha=rollout_alpha,
+            linewidth=rollout_linewidth, zorder=2,
+        )
+    ax.plot(
+        trajs[best_idx, :, 0], trajs[best_idx, :, 1],
+        color=best_rollout_color, alpha=best_rollout_alpha,
+        linewidth=best_rollout_linewidth, zorder=3,
+        label="Best rollout",
+    )
+
+    if plot_overlay is not None:
+        plot_overlay(ax)
+
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_edgecolor("black")
+        spine.set_linewidth(1.0)
+    fig.tight_layout()
+    fig.savefig(out_dir / f"{file_prefix}_step_{step:05d}.png", dpi=dpi)
+    plt.close(fig)
+
+
+def visualize_rollouts_3d(
+    controller,
+    step: int,
+    *,
+    mj_model,
+    mj_data,
+    output_dir: str | Path,
+    xlim: Optional[Tuple[float, float]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
+    zlim: Optional[Tuple[float, float]] = None,
+    goal_xyz: Optional[np.ndarray] = None,
+    ee_xyz: Optional[np.ndarray] = None,
+    cylinders: Optional[Sequence[Tuple[Tuple[float, float, float], float, float]]] = None,
+    elev: float = 25.0,
+    azim: float = -60.0,
+    num_rollout_samples: int = 50,
+    rollout_state_indices: Sequence[int] = (0, 1, 2),
+    rollout_site_id: Optional[int] = None,
+    rollout_color: str = "black",
+    rollout_alpha: float = 0.15,
+    rollout_linewidth: float = 0.5,
+    best_rollout_color: str = "purple",
+    best_rollout_alpha: float = 0.9,
+    best_rollout_linewidth: float = 2.0,
+    file_prefix: str = "rollouts",
+    dpi: int = 150,
+) -> None:
+    """Render MPPI rollout trajectories in 3D with obstacles, goal and EE."""
+    if num_rollout_samples <= 0:
+        return
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    trajs, _, best_idx = _rollout_trajectories_cpu(
+        controller, mj_model, mj_data,
+        num_rollouts=num_rollout_samples,
+        state_indices=rollout_state_indices,
+        site_id=rollout_site_id,
+    )
+
+    fig = plt.figure(figsize=(12, 9))
+    ax = fig.add_subplot(111, projection="3d")
+
+    if cylinders is not None:
+        for ctr, r, hh in cylinders:
+            _draw_cylinder(ax, ctr, r, hh)
+
+    for i in range(trajs.shape[0]):
+        if i == best_idx:
+            continue
+        ax.plot(
+            trajs[i, :, 0], trajs[i, :, 1], trajs[i, :, 2],
+            color=rollout_color, alpha=rollout_alpha,
+            linewidth=rollout_linewidth, zorder=2,
+        )
+    ax.plot(
+        trajs[best_idx, :, 0], trajs[best_idx, :, 1], trajs[best_idx, :, 2],
+        color=best_rollout_color, alpha=best_rollout_alpha,
+        linewidth=best_rollout_linewidth, zorder=3,
+        label="Best rollout",
+    )
+
+    if goal_xyz is not None:
+        ax.scatter(
+            goal_xyz[0], goal_xyz[1], goal_xyz[2],
+            color="red", s=200, marker="*", label="Goal", zorder=5,
+        )
+
+    if ee_xyz is not None:
+        ax.scatter(
+            ee_xyz[0], ee_xyz[1], ee_xyz[2],
+            color="lime", s=120, marker="o", label="EE", zorder=5,
+            edgecolors="black", linewidths=0.5,
+        )
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    if zlim is not None:
+        ax.set_zlim(*zlim)
+    ax.view_init(elev=elev, azim=azim)
+    ax.set_title(f"MPPI Rollouts — step {step}", fontsize=14)
+
+    if goal_xyz is not None or ee_xyz is not None:
+        ax.legend(loc="upper left", fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(out_dir / f"{file_prefix}_step_{step:05d}.png", dpi=dpi)
     plt.close(fig)

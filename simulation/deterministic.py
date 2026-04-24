@@ -349,7 +349,8 @@ def run_interactive(
                 screenshot_pending = False
 
             if (
-                screenshot_every > 0
+                take_screenshot
+                and screenshot_every > 0
                 and screenshot_path is not None
                 and (step_idx + 1) % screenshot_every == 0
             ):

@@ -17,7 +17,10 @@ from algs import (
 )
 from simulation.deterministic import run_interactive
 from tasks.ur5e import UR5e
-from utils.visualize_learned_value import visualize_learned_value_3d_scatter
+from utils.visualize_learned_value import (
+    visualize_learned_value_3d_scatter,
+    visualize_rollouts_3d,
+)
 
 WEIGHTS_DIR = (
     Path(__file__).resolve().parents[1]
@@ -80,7 +83,7 @@ def main():
     pretrain_target_scale = 1.0
 
     # ── Visualization parameters ───────────────────────────────────────
-    visualize = True
+    visualize = False
     visualize_every = 50
 
     # ── Simulation parameters ───────────────────────────────────────────
@@ -107,7 +110,7 @@ def main():
         Path(__file__).resolve().parents[1] / "visualize" / "ur5e" / "ur5e.png"
     )
     screenshot_dpi = 600
-    screenshot_every = 50  # also capture every N steps as <task>_step_<N>.png
+    screenshot_every = 10  # also capture every N steps as <task>_step_<N>.png
 
     # ── Task setup ──────────────────────────────────────────────────────
     task = UR5e()
@@ -222,9 +225,9 @@ def main():
     else:  # mppi
         controller = MPPI(**shared)
 
-    # ── Learned value visualization setup ─────────────────────────────────────
+    # ── Visualization setup ───────────────────────────────────────────────────
     vis_fn = None
-    if visualize and args.controller in ("learned_value", "density_learned_value"):
+    if visualize:
         vis_dir = Path(__file__).resolve().parents[1] / "visualize" / "ur5e"
 
         # Obstacle cylinders from scene.xml: (center, radius, half_height)
@@ -236,22 +239,42 @@ def main():
             ((-0.2, 0.7, 0.20), 0.085, 0.20),
         ]
 
-        def _vis_fn(ctrl, step):
-            # Get current EE position from mj_data
-            ee_pos = mj_data.site_xpos[ee_site_id].copy()
-            visualize_learned_value_3d_scatter(
-                ctrl, step,
-                resolution=30,
-                output_dir=vis_dir,
-                xlim=(-0.6, 0.6),
-                ylim=(-0.2, 1.0),
-                zlim=(-0.1, 0.7),
-                goal_xyz=goal_xyz,
-                ee_xyz=ee_pos,
-                cylinders=ur5e_cylinders,
-                elev=25.0,
-                azim=-60.0,
-            )
+        if args.controller in ("learned_value", "density_learned_value"):
+            def _vis_fn(ctrl, step):
+                ee_pos = mj_data.site_xpos[ee_site_id].copy()
+                visualize_learned_value_3d_scatter(
+                    ctrl, step,
+                    resolution=30,
+                    output_dir=vis_dir,
+                    xlim=(-0.6, 0.6),
+                    ylim=(-0.2, 1.0),
+                    zlim=(-0.1, 0.7),
+                    goal_xyz=goal_xyz,
+                    ee_xyz=ee_pos,
+                    cylinders=ur5e_cylinders,
+                    elev=25.0,
+                    azim=-60.0,
+                )
+        else:
+            def _vis_fn(ctrl, step):
+                ee_pos = mj_data.site_xpos[ee_site_id].copy()
+                visualize_rollouts_3d(
+                    ctrl, step,
+                    mj_model=mj_model,
+                    mj_data=mj_data,
+                    output_dir=vis_dir,
+                    xlim=(-0.6, 0.6),
+                    ylim=(-0.2, 1.0),
+                    zlim=(-0.1, 0.7),
+                    goal_xyz=goal_xyz,
+                    ee_xyz=ee_pos,
+                    cylinders=ur5e_cylinders,
+                    elev=25.0,
+                    azim=-60.0,
+                    num_rollout_samples=50,
+                    rollout_state_indices=(0, 1, 2),
+                    rollout_site_id=ee_site_id,
+                )
 
         vis_fn = _vis_fn
 

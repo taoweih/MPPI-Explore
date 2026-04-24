@@ -18,7 +18,7 @@ from algs import (
 )
 from simulation.deterministic import run_interactive
 from tasks.u_point_mass import UPointMass
-from utils.visualize_learned_value import visualize_learned_value
+from utils.visualize_learned_value import visualize_learned_value, visualize_rollouts
 
 WEIGHTS_DIR = (
     Path(__file__).resolve().parents[1]
@@ -42,7 +42,7 @@ def main():
     num_samples = 512
     noise_level = 3.0
     temperature = 0.001
-    plan_horizon = 0.2
+    plan_horizon = 2.0
     spline_type = "zero"
     num_knots = 16
     iterations = 1
@@ -83,12 +83,13 @@ def main():
     # ── Visualization parameters ───────────────────────────────────────
     visualize = True
     visualize_every = 10
+    num_rollout_samples = 512
 
     # ── Simulation parameters ───────────────────────────────────────────
     frequency = 50.0
     max_steps = 1001
     show_traces = False
-    record_video = True
+    record_video = False
 
     # ── Video quality (only used when record_video=True) ────────────────
     video_width = 1080
@@ -103,7 +104,7 @@ def main():
     camera_elevation = -89.0
 
     # ── Screenshot parameters ──────────────────────────────────────────
-    take_screenshot = True
+    take_screenshot = False
     screenshot_path = str(
         Path(__file__).resolve().parents[1] / "visualize" / "u_point_mass" / "u_point_mass.png"
     )
@@ -219,9 +220,9 @@ def main():
     else:  # mppi
         controller = MPPI(**shared)
 
-    # ── Learned value visualization setup ─────────────────────────────────────
+    # ── Visualization setup ───────────────────────────────────────────────────
     vis_fn = None
-    if visualize and args.controller in ("learned_value", "density_learned_value"):
+    if visualize:
         vis_dir = Path(__file__).resolve().parents[1] / "visualize" / "u_point_mass"
 
         def _plot_overlay(ax):
@@ -246,20 +247,37 @@ def main():
                 zorder=6,
             ))
 
-        def _vis_fn(ctrl, step):
-            visualize_learned_value(
-                ctrl, step,
-                output_dir=vis_dir,
-                plot_overlay=_plot_overlay,
-                vmin=0, vmax=2,
-                mj_model=mj_model,
-                mj_data=mj_data,
-                num_rollout_samples=50,
-                rollout_color="black",
-                rollout_alpha=0.12,
-                best_rollout_color="purple",
-                best_rollout_linewidth=1.5,
-            )
+        if args.controller in ("learned_value", "density_learned_value"):
+            def _vis_fn(ctrl, step):
+                visualize_learned_value(
+                    ctrl, step,
+                    output_dir=vis_dir,
+                    plot_overlay=_plot_overlay,
+                    vmin=0, vmax=2,
+                    mj_model=mj_model,
+                    mj_data=mj_data,
+                    num_rollout_samples=num_rollout_samples,
+                    rollout_color="black",
+                    rollout_alpha=0.12,
+                    best_rollout_color="purple",
+                    best_rollout_linewidth=1.5,
+                )
+        else:
+            def _vis_fn(ctrl, step):
+                visualize_rollouts(
+                    ctrl, step,
+                    mj_model=mj_model,
+                    mj_data=mj_data,
+                    output_dir=vis_dir,
+                    plot_overlay=_plot_overlay,
+                    xlim=(value_grid_min, value_grid_max),
+                    ylim=(value_grid_min, value_grid_max),
+                    num_rollout_samples=num_rollout_samples,
+                    rollout_color="black",
+                    rollout_alpha=0.6,
+                    best_rollout_color="purple",
+                    best_rollout_linewidth=1.5,
+                )
 
         vis_fn = _vis_fn
 
