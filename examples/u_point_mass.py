@@ -42,7 +42,7 @@ def main():
     num_samples = 512
     noise_level = 3.0
     temperature = 0.001
-    plan_horizon = 2.0
+    plan_horizon = 0.2
     spline_type = "zero"
     num_knots = 16
     iterations = 1
@@ -83,7 +83,7 @@ def main():
     # ── Visualization parameters ───────────────────────────────────────
     visualize = True
     visualize_every = 10
-    num_rollout_samples = 512
+    num_rollout_samples = 50
 
     # ── Simulation parameters ───────────────────────────────────────────
     frequency = 50.0
