@@ -54,8 +54,6 @@ def main():
     num_knots_per_stage = 2
     kde_bandwidth = 0.30
     inverse_density_power = 0.5
-    state_dim = 3
-    state_source_field = "site_xpos"
 
     # ── Learned value parameters ───────────────────────────────────────────────
     value_grid_min = -2.0
@@ -90,7 +88,7 @@ def main():
     frequency = 50.0
     max_steps = 1000
     show_traces = False
-    record_video = True
+    record_video = False
 
     # ── Video quality (only used when record_video=True) ────────────────
     video_width = 1080
@@ -105,7 +103,7 @@ def main():
     camera_elevation = -52.7
 
     # ── Screenshot parameters ──────────────────────────────────────────
-    take_screenshot = True
+    take_screenshot = False
     screenshot_path = str(
         Path(__file__).resolve().parents[1] / "visualize" / "ur5e" / "ur5e.png"
     )
@@ -145,18 +143,12 @@ def main():
             num_knots_per_stage=num_knots_per_stage,
             kde_bandwidth=kde_bandwidth,
             inverse_density_power=inverse_density_power,
-            state_dim=state_dim,
-            state_source_field=state_source_field,
-            state_source_body_id=ee_site_id,
         )
 
     elif args.controller in ("learned_value", "density_learned_value"):
         use_density = args.controller == "density_learned_value"
         controller = ValueGuidedMPPI(
             **shared,
-            state_dim=state_dim,
-            state_source_field=state_source_field,
-            state_source_body_id=ee_site_id,
             value_grid_min=value_grid_min,
             value_grid_max=value_grid_max,
             hashgrid_num_levels=hashgrid_num_levels,
@@ -179,7 +171,7 @@ def main():
         )
 
         def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
-            return rng.uniform(value_grid_min, value_grid_max, size=(n, state_dim)).astype(np.float32)
+            return rng.uniform(value_grid_min, value_grid_max, size=(n, task.state_dim)).astype(np.float32)
 
         def target_function(states: np.ndarray) -> np.ndarray:
             diff = states - goal_xyz[None, :]

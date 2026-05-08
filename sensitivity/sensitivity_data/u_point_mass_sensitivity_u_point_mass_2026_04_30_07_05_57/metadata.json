@@ -1,0 +1,115 @@
+{
+  "task_name": "u_point_mass",
+  "config": {
+    "num_trials": 50,
+    "frequency": 50.0,
+    "goal_threshold": 0.4,
+    "max_iterations": 2000,
+    "output_tag": "u_point_mass"
+  },
+  "sweeps": [
+    {
+      "name": "kde_bandwidth",
+      "axis_label": "KDE Bandwidth (\u03c3)",
+      "controller_name": "Density-Guided MPPI",
+      "values": [
+        0.05000000074505806,
+        0.07500000298023224,
+        0.10000000149011612,
+        0.15000000596046448,
+        0.20000000298023224,
+        0.25,
+        0.30000001192092896,
+        0.4000000059604645
+      ],
+      "log_x": false
+    },
+    {
+      "name": "inverse_density_power",
+      "axis_label": "Inverse Density Power (\u03b1)",
+      "controller_name": "Density-Guided MPPI",
+      "values": [
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        1.0,
+        1.25,
+        1.5
+      ],
+      "log_x": false
+    },
+    {
+      "name": "num_knots_per_stage",
+      "axis_label": "Knots per Stage  (num_stages = 16 / this)",
+      "controller_name": "Density-Guided MPPI",
+      "values": [
+        2,
+        4,
+        8,
+        16
+      ],
+      "log_x": false
+    },
+    {
+      "name": "hashgrid_table_size",
+      "axis_label": "Hashgrid Table Size",
+      "controller_name": "Value-Guided MPPI",
+      "values": [
+        256,
+        1024,
+        4096,
+        16384,
+        65536,
+        262144
+      ],
+      "log_x": true
+    },
+    {
+      "name": "hashgrid_num_levels",
+      "axis_label": "Hashgrid Resolution Levels",
+      "controller_name": "Value-Guided MPPI",
+      "values": [
+        2,
+        4,
+        8,
+        16
+      ],
+      "log_x": false
+    },
+    {
+      "name": "online_learning_rate",
+      "axis_label": "Online Learning Rate",
+      "controller_name": "Value-Guided MPPI",
+      "values": [
+        9.999999747378752e-05,
+        0.0005000000237487257,
+        0.0010000000474974513,
+        0.004999999888241291,
+        0.009999999776482582,
+        0.05000000074505806
+      ],
+      "log_x": true
+    },
+    {
+      "name": "online_update_epochs",
+      "axis_label": "Online Update Epochs",
+      "controller_name": "Value-Guided MPPI",
+      "values": [
+        1,
+        2,
+        5,
+        10
+      ],
+      "log_x": false
+    }
+  ],
+  "baseline": {
+    "name": "MPPI",
+    "success": 48.0,
+    "success_time_mean": 17.275833129882812,
+    "success_time_std": 9.734087944030762,
+    "frequency_mean": 69.42826080322266,
+    "frequency_std": 0.16459700465202332
+  }
+}

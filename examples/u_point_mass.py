@@ -52,8 +52,6 @@ def main():
     num_knots_per_stage = 4
     kde_bandwidth = 0.15
     inverse_density_power = 0.5
-    state_dim = 2
-    state_source_field = "qpos"
 
     # ── Learned value parameters ───────────────────────────────────────────────
     value_grid_min = -1.0
@@ -81,7 +79,7 @@ def main():
     pretrain_target_scale = 1.0
 
     # ── Visualization parameters ───────────────────────────────────────
-    visualize = True
+    visualize = False
     visualize_every = 10
     num_rollout_samples = 50
 
@@ -142,16 +140,12 @@ def main():
             num_knots_per_stage=num_knots_per_stage,
             kde_bandwidth=kde_bandwidth,
             inverse_density_power=inverse_density_power,
-            state_dim=state_dim,
-            state_source_field=state_source_field,
         )
 
     elif args.controller in ("learned_value", "density_learned_value"):
         use_density = args.controller == "density_learned_value"
         controller = ValueGuidedMPPI(
             **shared,
-            state_dim=state_dim,
-            state_source_field=state_source_field,
             value_grid_min=value_grid_min,
             value_grid_max=value_grid_max,
             hashgrid_num_levels=hashgrid_num_levels,
@@ -174,7 +168,7 @@ def main():
         )
 
         def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
-            return rng.uniform(value_grid_min, value_grid_max, size=(n, state_dim)).astype(np.float32)
+            return rng.uniform(value_grid_min, value_grid_max, size=(n, task.state_dim)).astype(np.float32)
 
         def target_function(states: np.ndarray) -> np.ndarray:
             diff = states - goal_xy[None, :]

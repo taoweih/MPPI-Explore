@@ -116,8 +116,6 @@ def _learned_value_controller(
         num_knots=NUM_KNOTS,
         iterations=1,
         seed=0,
-        state_dim=2,
-        state_source_field="qpos",
         value_grid_min=VALUE_GRID_MIN,
         value_grid_max=VALUE_GRID_MAX,
         hashgrid_num_levels=HASHGRID_NUM_LEVELS,
@@ -179,7 +177,6 @@ def _density_factory(task, h, num_samples=None):
         num_knots_per_stage=NUM_KNOTS_PER_STAGE,
         kde_bandwidth=KDE_BANDWIDTH,
         inverse_density_power=INVERSE_DENSITY_POWER,
-        state_dim=2,
     )
 
 

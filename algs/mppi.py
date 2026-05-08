@@ -1,4 +1,23 @@
-"""MPPI controller using mujoco_warp for parallel rollouts."""
+"""Model-Predictive Path Integral (MPPI) control via mujoco_warp.
+
+Algorithm (one optimize step):
+
+    1. warm-start the knot trajectory by shifting along time.
+    2. sample noisy knots
+           K_i = clip(μ + σ · 𝒩(0, I),  u_min, u_max),     i = 1..N
+       and zero/linear/cubic-interpolate to a control sequence u_i(t).
+    3. roll out all samples in parallel through mujoco_warp:
+           x^i_{t+1} = f(x^i_t, u_i(t))
+           J_i = Σ_t ℓ(x^i_t, u_i(t)) · dt + φ(x^i_T)
+    4. softmax weight update
+           w_i = exp(-J_i / λ) / Σ_j exp(-J_j / λ)
+           μ ← Σ_i w_i · K_i
+
+The rollout (physics step + cost accumulation) is captured once as a
+CUDA graph and replayed each call.  The only per-optimize host-device
+syncs are: one CPU→GPU upload of sampled controls, one GPU→CPU
+readback of total costs (length N).
+"""
 
 import mujoco
 import mujoco_warp as mjwarp
@@ -6,20 +25,13 @@ import numpy as np
 import warp as wp
 from typing import Literal, Optional
 
+from algs._graph import capture_graph
 from tasks.task_base import Task
 from utils.spline import get_interp_func
 
 
 class MPPI:
-    """Model-predictive path integral control using mujoco_warp.
-
-    Samples control sequences around a mean, rolls out in parallel via
-    mujoco_warp, and updates the mean with an exponentially weighted average.
-
-    Uses CUDA graph capture to eliminate kernel launch overhead — the entire
-    rollout (step + cost accumulation) is captured as a single graph and
-    replayed each call. This gives ~10-20x speedup over individual launches.
-    """
+    """Base MPPI controller — sampling + softmax weighting + CUDA-graph rollout."""
 
     def __init__(
         self,
@@ -53,45 +65,71 @@ class MPPI:
         )
         self.mean = np.zeros((num_knots, task.nu), dtype=np.float32)
 
-        self.warp_data = mjwarp.make_data(task.mj_model, nworld=num_samples)
+        self._alloc_buffers()
+
+        # CUDA graph is built lazily on first rollout call (kernels must be
+        # compiled before capture).  run_interactive / run_benchmark warm
+        # this up by calling optimize() twice before timing.
+        self._rollout_graph: Optional[wp.Graph] = None
+
+    # ------------------------------------------------------------------
+    # GPU buffer allocation
+    # ------------------------------------------------------------------
+
+    def _alloc_buffers(self) -> None:
+        """Pre-allocate every GPU buffer the captured rollout will read/write.
+
+        Buffer addresses are fixed for the lifetime of the controller — the
+        captured CUDA graph references these exact addresses, so we never
+        reassign them (use `.assign()` for re-uploads).
+        """
+        self.warp_data = mjwarp.make_data(self.task.mj_model, nworld=self.num_samples)
         self._device = self.warp_data.ctrl.device
 
-        # Pre-allocated GPU buffers — reused every rollout.
-        self._controls_wp = wp.zeros(
-            (num_samples, self.ctrl_steps, task.nu), dtype=wp.float32, device=self._device
-        )
-        self._running_costs_wp = wp.zeros(num_samples, dtype=wp.float32, device=self._device)
-        self._terminal_costs_wp = wp.zeros(num_samples, dtype=wp.float32, device=self._device)
+        # Build the task's State struct once; field references stay valid for
+        # warp_data's lifetime, so the captured graph keeps seeing fresh values.
+        self._task_state = self.task.make_state(self.warp_data)
 
-        # CUDA graph is built lazily on first rollout call (needs kernel warm-up).
-        self._rollout_graph: Optional[wp.Graph] = None
+        self._controls_wp = wp.zeros(
+            (self.num_samples, self.ctrl_steps, self.task.nu),
+            dtype=wp.float32, device=self._device,
+        )
+        self._running_costs_wp = wp.zeros(
+            self.num_samples, dtype=wp.float32, device=self._device,
+        )
+        self._terminal_costs_wp = wp.zeros(
+            self.num_samples, dtype=wp.float32, device=self._device,
+        )
 
     # ------------------------------------------------------------------
     # CUDA graph
     # ------------------------------------------------------------------
 
     def _build_rollout_graph(self) -> None:
-        """Capture the rollout loop as a CUDA graph for fast replay."""
-        wp.capture_begin(force_module_load=False)
-        try:
+        """Capture the full rollout (physics + per-step running cost + terminal) as a CUDA graph."""
+        with capture_graph() as cap:
             self._running_costs_wp.zero_()
             self._terminal_costs_wp.zero_()
             for t in range(self.ctrl_steps):
-                wp.copy(self.warp_data.ctrl, self._controls_wp[:, t, :])
-                mjwarp.step(self.task.model, self.warp_data)
+                self._step_physics(t)
                 self.task.launch_running_cost(
-                    self.warp_data, self._running_costs_wp, self.dt
+                    self._task_state, self.warp_data.ctrl,
+                    self._running_costs_wp, self.dt,
                 )
             self._launch_terminal_cost(self._terminal_costs_wp)
-            self._rollout_graph = wp.capture_end()
-        except Exception:
-            wp.capture_end()
-            raise
+        self._rollout_graph = cap.graph
 
-    def _ensure_graph(self) -> None:
-        """Build the CUDA graph on first call (kernels must be compiled first)."""
-        if self._rollout_graph is None:
-            self._build_rollout_graph()
+    def _step_physics(self, t: int) -> None:
+        """Apply the t-th sampled control and step mujoco_warp once for every world."""
+        wp.copy(self.warp_data.ctrl, self._controls_wp[:, t, :])
+        mjwarp.step(self.task.model, self.warp_data)
+
+    def _launch_terminal_cost(self, out_wp: wp.array) -> None:
+        """Write terminal cost for all worlds into out_wp.
+
+        Override in subclasses to swap in a learned heuristic.
+        """
+        self.task.launch_terminal_cost(self._task_state, out_wp)
 
     # ------------------------------------------------------------------
     # State management
@@ -183,6 +221,7 @@ class MPPI:
             knots:    (num_samples, num_knots, nu)  numpy
             controls: (num_samples, ctrl_steps, nu) numpy
         """
+        # K_i = clip(μ + σ · 𝒩(0, I), u_min, u_max)
         noise = self.rng.standard_normal(
             (self.num_samples, self.num_knots, self.task.nu)
         ).astype(np.float32)
@@ -196,25 +235,14 @@ class MPPI:
     # Rollout
     # ------------------------------------------------------------------
 
-    def _launch_terminal_cost(self, out_wp: wp.array) -> None:
-        """Write terminal cost for all worlds into out_wp.
-
-        Override in subclasses to modify terminal cost (e.g. value blend).
-        """
-        self.task.launch_terminal_cost(self.warp_data, out_wp)
-
     def _rollout(self, controls: np.ndarray) -> np.ndarray:
-        """GPU-native rollout via CUDA graph.  Returns total costs (num_samples,).
-
-        On first call, warms up kernels and captures a CUDA graph. Subsequent
-        calls replay the graph with a single GPU dispatch, eliminating the
-        per-kernel launch overhead that dominates small-model rollouts.
-        """
+        """GPU-native rollout via CUDA graph.  Returns total costs (num_samples,)."""
         # Upload controls (CPU→GPU); graph reads from this buffer.
         self._controls_wp.assign(controls)
 
         # Build graph lazily after kernels are compiled (first optimize warm-up).
-        self._ensure_graph()
+        if self._rollout_graph is None:
+            self._build_rollout_graph()
 
         # Single GPU dispatch for the entire rollout.
         wp.capture_launch(self._rollout_graph)
@@ -227,17 +255,9 @@ class MPPI:
     # ------------------------------------------------------------------
 
     def _update_weights(self, total_costs: np.ndarray, knots: np.ndarray) -> np.ndarray:
-        """Softmax weight update.
-
-        Args:
-            total_costs: (num_samples,)
-            knots:       (num_samples, num_knots, nu)
-
-        Returns:
-            total_costs (unchanged, for callers that need it)
-        """
+        """Softmax mean update:  w_i = exp(-J_i / λ) / Z;  μ ← Σ_i w_i · K_i."""
         shifted = -total_costs / self.temperature
-        shifted -= shifted.max()
+        shifted -= shifted.max()  # for numerical stability of exp
         weights = np.exp(shifted)
         weights /= weights.sum()
         self.mean = np.sum(weights[:, None, None] * knots, axis=0)
@@ -248,10 +268,7 @@ class MPPI:
     # ------------------------------------------------------------------
 
     def optimize(self, mj_data: mujoco.MjData) -> np.ndarray:
-        """Run one MPPI optimization step.
-
-        Returns updated mean control knots, shape (num_knots, nu).
-        """
+        """Run one MPPI optimization step.  Returns updated mean knots."""
         self.warm_start(float(mj_data.time))
         self.set_state_from_mj_data(mj_data)
 
@@ -259,7 +276,7 @@ class MPPI:
             knots, controls = self._sample_knots()
             self._update_weights(self._rollout(controls), knots)
         else:
-            # Save from mj_data directly — no GPU→CPU sync
+            # Save from mj_data directly — no GPU→CPU sync.
             init_state = self._make_initial_state(mj_data)
             for _ in range(self.iterations):
                 self._restore_state(init_state)

@@ -107,7 +107,6 @@ def _learned_value_controller(
     num_samples: Optional[int] = None,
 ) -> ValueGuidedMPPI:
     goal_xyz = _goal_xyz(task)
-    ee_site_id = task.end_effector_pos_id
     n = NUM_SAMPLES_FOR_HORIZON_SWEEP if num_samples is None else int(num_samples)
 
     controller = ValueGuidedMPPI(
@@ -120,9 +119,6 @@ def _learned_value_controller(
         num_knots=NUM_KNOTS,
         iterations=1,
         seed=SEED,
-        state_dim=STATE_DIM,
-        state_source_field=STATE_SOURCE_FIELD,
-        state_source_body_id=ee_site_id,
         value_grid_min=VALUE_GRID_MIN,
         value_grid_max=VALUE_GRID_MAX,
         hashgrid_num_levels=HASHGRID_NUM_LEVELS,
@@ -184,9 +180,6 @@ def _density_factory(task, h, num_samples=None):
         num_knots_per_stage=NUM_KNOTS_PER_STAGE,
         kde_bandwidth=KDE_BANDWIDTH,
         inverse_density_power=INVERSE_DENSITY_POWER,
-        state_dim=STATE_DIM,
-        state_source_field=STATE_SOURCE_FIELD,
-        state_source_body_id=task.end_effector_pos_id,
     )
 
 

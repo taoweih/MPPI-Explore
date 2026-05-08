@@ -42,7 +42,7 @@ def main():
     num_samples = 1024
     noise_level = 0.3
     temperature = 0.00001
-    plan_horizon = 0.5
+    plan_horizon = 2.0
     spline_type = "zero"
     num_knots = 16
     iterations = 1
@@ -52,8 +52,6 @@ def main():
     num_knots_per_stage = 4
     kde_bandwidth = 0.10
     inverse_density_power = 0.5
-    state_dim = 2
-    state_source_field = "qpos"
 
     # ── Learned value parameters ───────────────────────────────────────
     value_grid_min = -10.0
@@ -88,7 +86,7 @@ def main():
     frequency = 50.0
     max_steps = 5001
     show_traces = False
-    record_video = True
+    record_video = False
 
     # ── Video quality (only used when record_video=True) ────────────────
     video_width = 1080
@@ -142,16 +140,12 @@ def main():
             num_knots_per_stage=num_knots_per_stage,
             kde_bandwidth=kde_bandwidth,
             inverse_density_power=inverse_density_power,
-            state_dim=state_dim,
-            state_source_field=state_source_field,
         )
 
     elif args.controller in ("learned_value", "density_learned_value"):
         use_density = args.controller == "density_learned_value"
         controller = ValueGuidedMPPI(
             **shared,
-            state_dim=state_dim,
-            state_source_field=state_source_field,
             value_grid_min=value_grid_min,
             value_grid_max=value_grid_max,
             hashgrid_num_levels=hashgrid_num_levels,
@@ -174,7 +168,7 @@ def main():
         )
 
         def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
-            return rng.uniform(value_grid_min, value_grid_max, size=(n, state_dim)).astype(np.float32)
+            return rng.uniform(value_grid_min, value_grid_max, size=(n, task.state_dim)).astype(np.float32)
 
         def target_function(states: np.ndarray) -> np.ndarray:
             diff = states - goal_xy[None, :]
