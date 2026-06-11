@@ -124,6 +124,24 @@ class Task(ABC):
     ) -> None:
         """Overwrite terminal_cost(x) into out_wp (shape (nworld,), `=`)."""
 
+    def launch_step_control(
+        self,
+        state,
+        action_arr: wp.array,
+        ctrl_arr: wp.array,
+    ) -> None:
+        """Write simulator controls for one rollout step.
+
+        Default behavior treats sampled MPPI actions as MuJoCo controls.
+        Tasks with transformed action spaces can override this to write
+        derived actuator controls into ``ctrl_arr`` before ``mjwarp.step``.
+        """
+        wp.copy(ctrl_arr, action_arr)
+
+    def apply_control_cpu(self, mj_data: mujoco.MjData, action: np.ndarray) -> None:
+        """Apply one selected controller action to the live CPU MuJoCo state."""
+        mj_data.ctrl[:] = action
+
     def extract_state(
         self,
         state,
@@ -143,6 +161,16 @@ class Task(ABC):
             f"{type(self).__name__} does not implement extract_state; "
             "this task cannot be used with density-guided or value-guided MPPI."
         )
+
+    def extract_state_cpu(self, mj_data: mujoco.MjData) -> np.ndarray:
+        """CPU-side mirror of `extract_state` for a single MjData.
+
+        Default reads ``qpos[:state_dim]`` — matches the GPU `state_extract`
+        kernel for tasks whose state vector is the first ``state_dim`` of
+        ``qpos`` (UPointMass, Ant).  Tasks that extract from `site_xpos` /
+        `sensordata` etc. should override.
+        """
+        return np.asarray(mj_data.qpos[:self.state_dim], dtype=np.float32)
 
     def success_function(self, data_np: dict, control: np.ndarray) -> np.ndarray:
         """CPU-side success metric used only in benchmarks and interactive viz.

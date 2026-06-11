@@ -98,6 +98,13 @@ class UR5e(Task):
         wp.launch(self.state_extract, dim=out_wp.shape[0],
                   inputs=[state, weight_wp, out_wp, self.end_effector_pos_id])
 
+    def extract_state_cpu(self, mj_data) -> np.ndarray:
+        """End-effector position (matches the GPU `state_extract` kernel)."""
+        return np.asarray(
+            mj_data.site_xpos[self.end_effector_pos_id, :self.state_dim],
+            dtype=np.float32,
+        )
+
     def success_function(self, data_np: dict, control: np.ndarray) -> np.ndarray:
         site_xpos = data_np["site_xpos"]
         xpos = data_np["xpos"]

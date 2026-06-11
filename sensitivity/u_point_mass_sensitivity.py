@@ -21,7 +21,8 @@ from algs import (  # noqa: E402
     MPPI,
     DensityGuidedMPPI,
     ValueGuidedMPPI,
-    ValuePretrainConfig,
+    HashGridValueModel,
+    KDEDensityModel,
 )
 from sensitivity.sensitivity_suite import (  # noqa: E402
     ParamSweep,
@@ -126,9 +127,11 @@ def _density_factory(task: UPointMass, **overrides) -> DensityGuidedMPPI:
         num_knots=NUM_KNOTS,
         iterations=1,
         seed=0,
+        density_model=KDEDensityModel(
+            bandwidth=float(overrides.get("kde_bandwidth", DEFAULT_KDE_BANDWIDTH)),
+            alpha=float(overrides.get("inverse_density_power", DEFAULT_INVERSE_DENSITY_POWER)),
+        ),
         num_knots_per_stage=int(overrides.get("num_knots_per_stage", DEFAULT_NUM_KNOTS_PER_STAGE)),
-        kde_bandwidth=float(overrides.get("kde_bandwidth", DEFAULT_KDE_BANDWIDTH)),
-        inverse_density_power=float(overrides.get("inverse_density_power", DEFAULT_INVERSE_DENSITY_POWER)),
     )
 
 
@@ -142,6 +145,15 @@ def _value_factory(task: UPointMass, **overrides) -> ValueGuidedMPPI:
     """
     goal_xy = _goal_xy(task)
 
+    value_model = HashGridValueModel(
+        state_dim=task.state_dim,
+        grid_min=VALUE_GRID_MIN, grid_max=VALUE_GRID_MAX,
+        num_levels=int(overrides.get("hashgrid_num_levels", DEFAULT_HASHGRID_NUM_LEVELS)),
+        table_size=int(overrides.get("hashgrid_table_size", DEFAULT_HASHGRID_TABLE_SIZE)),
+        min_resolution=float(overrides.get("hashgrid_min_resolution", DEFAULT_HASHGRID_MIN_RESOLUTION)),
+        max_resolution=float(overrides.get("hashgrid_max_resolution", DEFAULT_HASHGRID_MAX_RESOLUTION)),
+        seed=0,
+    )
     controller = ValueGuidedMPPI(
         task=task,
         num_samples=NUM_SAMPLES,
@@ -152,50 +164,30 @@ def _value_factory(task: UPointMass, **overrides) -> ValueGuidedMPPI:
         num_knots=NUM_KNOTS,
         iterations=1,
         seed=0,
-        # Hash-grid architecture
-        value_grid_min=VALUE_GRID_MIN,
-        value_grid_max=VALUE_GRID_MAX,
-        hashgrid_num_levels=int(overrides.get("hashgrid_num_levels", DEFAULT_HASHGRID_NUM_LEVELS)),
-        hashgrid_table_size=int(overrides.get("hashgrid_table_size", DEFAULT_HASHGRID_TABLE_SIZE)),
-        hashgrid_min_resolution=float(overrides.get("hashgrid_min_resolution", DEFAULT_HASHGRID_MIN_RESOLUTION)),
-        hashgrid_max_resolution=float(overrides.get("hashgrid_max_resolution", DEFAULT_HASHGRID_MAX_RESOLUTION)),
-        # Online learning
+        value_model=value_model,
         online_learning_rate=float(overrides.get("online_learning_rate", DEFAULT_ONLINE_LEARNING_RATE)),
         online_update_epochs=int(overrides.get("online_update_epochs", DEFAULT_ONLINE_UPDATE_EPOCHS)),
         online_batch_size=DEFAULT_ONLINE_BATCH_SIZE,
-        online_anchor_samples=0,
-        online_new_state_weight=DEFAULT_ONLINE_NEW_STATE_WEIGHT,
-        goal_state=goal_xy[None, :],
-        goal_value=GOAL_VALUE,
-        goal_weight=GOAL_WEIGHT,
-        # Density-compose disabled for these value-only sweeps
-        use_density_guided=False,
-        num_knots_per_stage=DEFAULT_NUM_KNOTS_PER_STAGE,
-        kde_bandwidth=DEFAULT_KDE_BANDWIDTH,
-        inverse_density_power=DEFAULT_INVERSE_DENSITY_POWER,
-        disable_replay_anchors=True,
     )
 
-    def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
+    def state_sampler(rng: np.random.Generator, m: int) -> np.ndarray:
         return rng.uniform(VALUE_GRID_MIN, VALUE_GRID_MAX,
-                           size=(n, task.state_dim)).astype(np.float32)
+                           size=(m, task.state_dim)).astype(np.float32)
 
     def target_function(states: np.ndarray) -> np.ndarray:
         diff = states - goal_xy[None, :]
         return PRETRAIN_TARGET_SCALE * np.sqrt(np.sum(diff * diff, axis=1)).astype(np.float32)
 
-    controller.configure_value_pretraining(
+    controller.pretrain(
         state_sampler=state_sampler,
         target_function=target_function,
-        config=ValuePretrainConfig(
-            sample_count=PRETRAIN_SAMPLE_COUNT,
-            epochs=PRETRAIN_EPOCHS,
-            batch_size=PRETRAIN_BATCH_SIZE,
-            learning_rate=PRETRAIN_LEARNING_RATE,
-            print_every=PRETRAIN_EPOCHS,  # quiet
-        ),
+        sample_count=PRETRAIN_SAMPLE_COUNT,
+        epochs=PRETRAIN_EPOCHS,
+        batch_size=PRETRAIN_BATCH_SIZE,
+        learning_rate=PRETRAIN_LEARNING_RATE,
+        verbose=False,
+        print_every=PRETRAIN_EPOCHS,
     )
-    controller.pretrain_learned_value(verbose=False)
     return controller
 
 

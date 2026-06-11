@@ -102,7 +102,7 @@ def _predict_nominal_traces(
     trace_frames.append(trace_data)
 
     for u in controls[1:]:
-        temp_data.ctrl[:] = u
+        controller.task.apply_control_cpu(temp_data, u)
         mujoco.mj_step(mj_model, temp_data)
         trace_data = controller.task.get_trace_positions(
             _single_world_data(temp_data, fields=("xpos", "site_xpos"))
@@ -219,6 +219,8 @@ def run_interactive(
     st = time.time()
     controller.optimize(mj_data)
     controller.optimize(mj_data)
+    if getattr(controller, "reset_after_warmup", False) and hasattr(controller, "reset"):
+        controller.reset(seed=getattr(controller, "seed", 0))
     print(f"Warm-up took {time.time() - st:.3f}s")
 
     screenshot_pending = bool(take_screenshot and screenshot_path is not None)
@@ -293,12 +295,32 @@ def run_interactive(
                 )
                 viewer.user_scn.ngeom += 1
 
+        def step_current_plan() -> None:
+            sim_dt = mj_model.opt.timestep
+            t_curr = mj_data.time
+            tq = np.arange(sim_steps_per_replan, dtype=np.float32) * sim_dt + t_curr
+            us = controller.interp_func(
+                tq, controller.tk, controller.mean[None, ...],
+            )[0]
+
+            for i in range(sim_steps_per_replan):
+                controller.task.apply_control_cpu(mj_data, us[i])
+                mujoco.mj_step(mj_model, mj_data)
+
+        act_before_plan = bool(getattr(controller, "act_before_plan", False))
+
         for step_idx in range(max_steps):
             start_time = time.time()
 
-            plan_start = time.time()
-            controller.optimize(mj_data)
-            plan_time = time.time() - plan_start
+            if act_before_plan:
+                step_current_plan()
+                plan_start = time.time()
+                controller.optimize(mj_data)
+                plan_time = time.time() - plan_start
+            else:
+                plan_start = time.time()
+                controller.optimize(mj_data)
+                plan_time = time.time() - plan_start
 
             if visualize_fn is not None and step_idx % visualize_every == 0:
                 visualize_fn(controller, step_idx)
@@ -321,14 +343,8 @@ def run_interactive(
                             )
                             ii += 1
 
-            sim_dt = mj_model.opt.timestep
-            t_curr = mj_data.time
-            tq = np.arange(sim_steps_per_replan, dtype=np.float32) * sim_dt + t_curr
-            us = controller.interp_func(tq, controller.tk, controller.mean[None, ...])[0]
-
-            for i in range(sim_steps_per_replan):
-                mj_data.ctrl[:] = us[i]
-                mujoco.mj_step(mj_model, mj_data)
+            if not act_before_plan:
+                step_current_plan()
 
             viewer.sync()
 
@@ -451,6 +467,8 @@ def run_benchmark(
     st = time.time()
     controller.optimize(mj_data)
     controller.optimize(mj_data)
+    if getattr(controller, "reset_after_warmup", False) and hasattr(controller, "reset"):
+        controller.reset(seed=trial_seed_base, initial_knots=initial_knots)
     print(f"Warm-up took {time.time() - st:.3f}s")
 
     mj_data_reset = mujoco.MjData(mj_model)
@@ -474,6 +492,7 @@ def run_benchmark(
 
     total_plan_time = 0.0
     total_plan_steps = 0
+    act_before_plan = bool(getattr(controller, "act_before_plan", False))
 
     for trial_idx in range(num_trials):
         _copy_mj_state(mj_model, mj_data, mj_data_reset)
@@ -507,26 +526,38 @@ def run_benchmark(
 
         reached_goal = False
 
+        def step_current_plan() -> None:
+            sim_dt = mj_model.opt.timestep
+            t_curr = mj_data.time
+            tq = np.arange(sim_steps_per_replan, dtype=np.float32) * sim_dt + t_curr
+            us = controller.interp_func(
+                tq, controller.tk, controller.mean[None, ...],
+            )[0]
+
+            for k in range(sim_steps_per_replan):
+                controller.task.apply_control_cpu(mj_data, us[k])
+                mujoco.mj_step(mj_model, mj_data)
+                if recorder is not None and recorder.is_recording and renderer is not None:
+                    renderer.update_scene(mj_data)
+                    recorder.add_frame(renderer.render().tobytes())
+
         for iter_idx in range(max_iterations):
-            plan_start = time.time()
-            controller.optimize(mj_data)
-            plan_time = time.time() - plan_start
+            if act_before_plan:
+                step_current_plan()
+                plan_start = time.time()
+                controller.optimize(mj_data)
+                plan_time = time.time() - plan_start
+            else:
+                plan_start = time.time()
+                controller.optimize(mj_data)
+                plan_time = time.time() - plan_start
             total_plan_time += plan_time
             total_plan_steps += 1
             trial_plan_time += plan_time
             trial_plan_steps += 1
 
-            sim_dt = mj_model.opt.timestep
-            t_curr = mj_data.time
-            tq = np.arange(sim_steps_per_replan, dtype=np.float32) * sim_dt + t_curr
-            us = controller.interp_func(tq, controller.tk, controller.mean[None, ...])[0]
-
-            for k in range(sim_steps_per_replan):
-                mj_data.ctrl[:] = us[k]
-                mujoco.mj_step(mj_model, mj_data)
-                if recorder is not None and recorder.is_recording and renderer is not None:
-                    renderer.update_scene(mj_data)
-                    recorder.add_frame(renderer.render().tobytes())
+            if not act_before_plan:
+                step_current_plan()
 
             state_trajectories[trial_idx, iter_idx] = np.asarray(
                 mj_data.qpos, dtype=np.float32

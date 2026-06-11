@@ -16,13 +16,19 @@ from tasks.task_base import Task, ROOT
 
 @wp.struct
 class State:
-    """Warp State struct bundling the warp_data fields read by this task's cost kernels.
+    """Warp State struct bundling the warp_data fields read by this task's cost
+    or state-extraction kernels.
 
     Field references stay valid for the lifetime of warp_data, so a single
     State built by `UPointMass.make_state` is reused for every kernel launch.
+    `qvel` isn't read by the default cost kernels but is exposed here so
+    user-supplied state-extraction functions (e.g. for density-guided MPPI
+    with full-state density) can read velocity.
     """
 
     qpos: wp.array2d(dtype=wp.float32)
+    qvel: wp.array2d(dtype=wp.float32)
+    qacc: wp.array2d(dtype=wp.float32)
     xpos: wp.array2d(dtype=wp.vec3f)
 
 
@@ -80,6 +86,8 @@ class UPointMass(Task):
     def make_state(self, warp_data) -> State:
         s = State()
         s.qpos = warp_data.qpos
+        s.qvel = warp_data.qvel
+        s.qacc = warp_data.qacc
         s.xpos = warp_data.xpos
         return s
 

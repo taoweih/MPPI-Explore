@@ -15,7 +15,9 @@ from algs import (  # noqa: E402
     MPPI,
     DensityGuidedMPPI,
     ValueGuidedMPPI,
-    ValuePretrainConfig,
+    ValueDensityGuidedMPPI,
+    HashGridValueModel,
+    KDEDensityModel,
 )
 from benchmark.senior_thesis_benchmarks.benchmark_suite import (  # noqa: E402
     ControllerSpec,
@@ -96,6 +98,10 @@ def _goal_xy(task: UPointMass) -> np.ndarray:
     return np.asarray(data.xpos[task.goal_pos_id, :2], dtype=np.float32)
 
 
+WEIGHTS_DIR = Path(__file__).resolve().parent / "saved_pretrain_weights"
+WEIGHTS_KEY = "u_point_mass_learned_value"
+
+
 def _learned_value_controller(
     task: UPointMass,
     horizon: float,
@@ -106,56 +112,57 @@ def _learned_value_controller(
     goal_xy = _goal_xy(task)
     n = NUM_SAMPLES_FOR_HORIZON_SWEEP if num_samples is None else int(num_samples)
 
-    controller = ValueGuidedMPPI(
-        task=task,
-        num_samples=n,
-        noise_level=NOISE_LEVEL,
-        temperature=TEMPERATURE,
-        plan_horizon=horizon,
-        spline_type="zero",
-        num_knots=NUM_KNOTS,
-        iterations=1,
+    value_model = HashGridValueModel(
+        state_dim=task.state_dim,
+        grid_min=VALUE_GRID_MIN, grid_max=VALUE_GRID_MAX,
+        num_levels=HASHGRID_NUM_LEVELS, table_size=HASHGRID_TABLE_SIZE,
+        min_resolution=HASHGRID_MIN_RESOLUTION,
+        max_resolution=HASHGRID_MAX_RESOLUTION,
         seed=0,
-        value_grid_min=VALUE_GRID_MIN,
-        value_grid_max=VALUE_GRID_MAX,
-        hashgrid_num_levels=HASHGRID_NUM_LEVELS,
-        hashgrid_table_size=HASHGRID_TABLE_SIZE,
-        hashgrid_min_resolution=HASHGRID_MIN_RESOLUTION,
-        hashgrid_max_resolution=HASHGRID_MAX_RESOLUTION,
+    )
+    controller_kwargs = dict(
+        task=task, num_samples=n, noise_level=NOISE_LEVEL,
+        temperature=TEMPERATURE, plan_horizon=horizon, spline_type="zero",
+        num_knots=NUM_KNOTS, iterations=1, seed=0,
+        value_model=value_model,
         online_learning_rate=ONLINE_LEARNING_RATE,
         online_update_epochs=ONLINE_UPDATE_EPOCHS,
         online_batch_size=ONLINE_BATCH_SIZE,
-        online_anchor_samples=ONLINE_ANCHOR_SAMPLES,
-        online_new_state_weight=ONLINE_NEW_STATE_WEIGHT,
-        goal_state=goal_xy[None, :],
-        goal_value=GOAL_VALUE,
-        goal_weight=GOAL_WEIGHT,
-        use_density_guided=use_density_guided,
-        num_knots_per_stage=NUM_KNOTS_PER_STAGE,
-        kde_bandwidth=KDE_BANDWIDTH,
-        inverse_density_power=INVERSE_DENSITY_POWER,
-        disable_replay_anchors=True,
     )
+    if use_density_guided:
+        controller = ValueDensityGuidedMPPI(
+            **controller_kwargs,
+            density_model=KDEDensityModel(
+                bandwidth=KDE_BANDWIDTH, alpha=INVERSE_DENSITY_POWER,
+            ),
+            num_knots_per_stage=NUM_KNOTS_PER_STAGE,
+        )
+    else:
+        controller = ValueGuidedMPPI(**controller_kwargs)
 
-    def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
-        return rng.uniform(VALUE_GRID_MIN, VALUE_GRID_MAX, size=(n, 2)).astype(np.float32)
+    def state_sampler(rng: np.random.Generator, m: int) -> np.ndarray:
+        return rng.uniform(VALUE_GRID_MIN, VALUE_GRID_MAX, size=(m, 2)).astype(np.float32)
 
     def target_function(states: np.ndarray) -> np.ndarray:
         diff = states - goal_xy[None, :]
         return PRETRAIN_TARGET_SCALE * np.sqrt(np.sum(diff * diff, axis=1)).astype(np.float32)
 
-    controller.configure_value_pretraining(
-        state_sampler=state_sampler,
-        target_function=target_function,
-        config=ValuePretrainConfig(
+    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+    weights_path = WEIGHTS_DIR / f"{WEIGHTS_KEY}.pt"
+    if weights_path.exists():
+        controller.load_pretrained_weights(weights_path)
+    else:
+        controller.pretrain(
+            state_sampler=state_sampler,
+            target_function=target_function,
             sample_count=PRETRAIN_SAMPLE_COUNT,
             epochs=PRETRAIN_EPOCHS,
             batch_size=PRETRAIN_BATCH_SIZE,
             learning_rate=PRETRAIN_LEARNING_RATE,
+            verbose=True,
             print_every=50,
-        ),
-    )
-    controller.pretrained_value_key = "u_point_mass_learned_value"
+        )
+        controller.save_pretrained_weights(weights_path)
     return controller
 
 
@@ -174,9 +181,10 @@ def _density_factory(task, h, num_samples=None):
         task=task, num_samples=n, noise_level=NOISE_LEVEL,
         temperature=TEMPERATURE, plan_horizon=h, spline_type="zero",
         num_knots=NUM_KNOTS, iterations=1, seed=0,
+        density_model=KDEDensityModel(
+            bandwidth=KDE_BANDWIDTH, alpha=INVERSE_DENSITY_POWER,
+        ),
         num_knots_per_stage=NUM_KNOTS_PER_STAGE,
-        kde_bandwidth=KDE_BANDWIDTH,
-        inverse_density_power=INVERSE_DENSITY_POWER,
     )
 
 

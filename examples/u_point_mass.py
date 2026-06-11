@@ -14,7 +14,10 @@ from algs import (
     MPPI,
     DensityGuidedMPPI,
     ValueGuidedMPPI,
-    ValuePretrainConfig,
+    ValueDensityGuidedMPPI,
+    HashGridValueModel,
+    KDEDensityModel,
+    KNNDensityModel,
 )
 from simulation.deterministic import run_interactive
 from tasks.u_point_mass import UPointMass
@@ -38,22 +41,33 @@ def main():
     )
     args = parser.parse_args()
 
-    # ── Shared MPPI parameters ──────────────────────────────────────────
+    # ── Algorithm parameters: base MPPI ─────────────────────────────────
     num_samples = 512
     noise_level = 3.0
     temperature = 0.001
-    plan_horizon = 0.2
+    plan_horizon = 1.5
     spline_type = "zero"
     num_knots = 16
     iterations = 1
     seed = 0
 
-    # ── Density-guided parameters ───────────────────────────────────────
+    # ── Algorithm parameters: density-guided MPPI ───────────────────────
+    density_model_type = "knn"  # "kde" or "knn"
     num_knots_per_stage = 4
-    kde_bandwidth = 0.15
-    inverse_density_power = 0.5
+    inverse_density_power = 1.0
 
-    # ── Learned value parameters ───────────────────────────────────────────────
+    # KDE density model
+    kde_bandwidth = 0.15
+
+    # KNN density model
+    knn_k = 5
+    knn_position_weight = 1.0
+    knn_angle_weight = 1.0
+    knn_linear_velocity_weight = 1.0
+    knn_angular_velocity_weight = 1.0
+    knn_include_task_state = False
+
+    # ── Algorithm parameters: value-guided MPPI ────────────────────────
     value_grid_min = -1.0
     value_grid_max = 1.0
     hashgrid_num_levels = 4
@@ -69,8 +83,6 @@ def main():
     goal_weight = 2000.0
     weights_key = "u_point_mass_learned_value"
     pretrain_mode = "load"  # "load" or "train"
-
-    # ── Pretraining parameters ──────────────────────────────────────────
     pretrain_sample_count = 100000
     pretrain_epochs = 100
     pretrain_batch_size = 512
@@ -121,8 +133,8 @@ def main():
     mujoco.mj_forward(task.mj_model, _tmp_data)
     goal_xy = np.asarray(_tmp_data.xpos[task.goal_pos_id, :2], dtype=np.float32)
 
-    # ── Build controller ────────────────────────────────────────────────
-    shared = dict(
+    # ── Controller setup ────────────────────────────────────────────────
+    base_mppi_kwargs = dict(
         task=task,
         num_samples=num_samples,
         noise_level=noise_level,
@@ -134,38 +146,63 @@ def main():
         seed=seed,
     )
 
+    def build_density_model():
+        if density_model_type == "kde":
+            return KDEDensityModel(
+                bandwidth=kde_bandwidth,
+                alpha=inverse_density_power,
+            )
+        if density_model_type == "knn":
+            return KNNDensityModel(
+                k=knn_k,
+                alpha=inverse_density_power,
+                position_weight=knn_position_weight,
+                angle_weight=knn_angle_weight,
+                linear_velocity_weight=knn_linear_velocity_weight,
+                angular_velocity_weight=knn_angular_velocity_weight,
+                include_task_state=knn_include_task_state,
+            )
+        raise ValueError(
+            f"Unknown density_model_type={density_model_type!r}; expected 'kde' or 'knn'."
+        )
+
+    def build_value_model():
+        return HashGridValueModel(
+            state_dim=task.state_dim,
+            grid_min=value_grid_min,
+            grid_max=value_grid_max,
+            num_levels=hashgrid_num_levels,
+            table_size=hashgrid_table_size,
+            min_resolution=hashgrid_min_resolution,
+            max_resolution=hashgrid_max_resolution,
+            seed=seed,
+        )
+
+    density_guided_kwargs = dict(num_knots_per_stage=num_knots_per_stage)
+
     if args.controller == "density":
         controller = DensityGuidedMPPI(
-            **shared,
-            num_knots_per_stage=num_knots_per_stage,
-            kde_bandwidth=kde_bandwidth,
-            inverse_density_power=inverse_density_power,
+            **base_mppi_kwargs,
+            density_model=build_density_model(),
+            **density_guided_kwargs,
         )
 
     elif args.controller in ("learned_value", "density_learned_value"):
-        use_density = args.controller == "density_learned_value"
-        controller = ValueGuidedMPPI(
-            **shared,
-            value_grid_min=value_grid_min,
-            value_grid_max=value_grid_max,
-            hashgrid_num_levels=hashgrid_num_levels,
-            hashgrid_table_size=hashgrid_table_size,
-            hashgrid_min_resolution=hashgrid_min_resolution,
-            hashgrid_max_resolution=hashgrid_max_resolution,
+        value_guided_kwargs = dict(
+            **base_mppi_kwargs,
+            value_model=build_value_model(),
             online_learning_rate=online_learning_rate,
             online_update_epochs=online_update_epochs,
             online_batch_size=online_batch_size,
-            online_anchor_samples=online_anchor_samples,
-            online_new_state_weight=online_new_state_weight,
-            goal_state=goal_xy[None, :],
-            goal_value=goal_value,
-            goal_weight=goal_weight,
-            use_density_guided=use_density,
-            num_knots_per_stage=num_knots_per_stage,
-            kde_bandwidth=kde_bandwidth,
-            inverse_density_power=inverse_density_power,
-            disable_replay_anchors=True,
         )
+        if args.controller == "density_learned_value":
+            controller = ValueDensityGuidedMPPI(
+                **value_guided_kwargs,
+                density_model=build_density_model(),
+                **density_guided_kwargs,
+            )
+        else:
+            controller = ValueGuidedMPPI(**value_guided_kwargs)
 
         def state_sampler(rng: np.random.Generator, n: int) -> np.ndarray:
             return rng.uniform(value_grid_min, value_grid_max, size=(n, task.state_dim)).astype(np.float32)
@@ -174,19 +211,6 @@ def main():
             diff = states - goal_xy[None, :]
             return pretrain_target_scale * np.sqrt(np.sum(diff * diff, axis=1)).astype(np.float32)
 
-        controller.configure_value_pretraining(
-            state_sampler=state_sampler,
-            target_function=target_function,
-            config=ValuePretrainConfig(
-                sample_count=pretrain_sample_count,
-                epochs=pretrain_epochs,
-                batch_size=pretrain_batch_size,
-                learning_rate=pretrain_learning_rate,
-                print_every=pretrain_print_every,
-            ),
-        )
-        controller.pretrained_value_key = weights_key
-
         WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
         weights_path = WEIGHTS_DIR / f"{weights_key}.pt"
 
@@ -194,9 +218,9 @@ def main():
             if not weights_path.exists():
                 raise FileNotFoundError(
                     f"Pretrained weights not found at {weights_path}. "
-                    "Run with --pretrain-mode train to generate them."
+                    "Run with pretrain_mode='train' to generate them."
                 )
-            controller.load_pretrained_value_weights(weights_path)
+            controller.load_pretrained_weights(weights_path)
             print(f"Loaded pretrained learned value weights from {weights_path}")
         else:  # train
             if weights_path.exists():
@@ -205,14 +229,22 @@ def main():
                     "Training from scratch — existing file will NOT be overwritten. "
                     "Delete it manually to save new weights."
                 )
-            if not controller.pretrain_learned_value(verbose=True):
-                raise RuntimeError("Value pretraining callbacks were not configured.")
+            controller.pretrain(
+                state_sampler=state_sampler,
+                target_function=target_function,
+                sample_count=pretrain_sample_count,
+                epochs=pretrain_epochs,
+                batch_size=pretrain_batch_size,
+                learning_rate=pretrain_learning_rate,
+                verbose=True,
+                print_every=pretrain_print_every,
+            )
             if not weights_path.exists():
-                controller.save_pretrained_value_weights(weights_path)
+                controller.save_pretrained_weights(weights_path)
                 print(f"Saved pretrained learned value weights to {weights_path}")
 
     else:  # mppi
-        controller = MPPI(**shared)
+        controller = MPPI(**base_mppi_kwargs)
 
     # ── Visualization setup ───────────────────────────────────────────────────
     vis_fn = None

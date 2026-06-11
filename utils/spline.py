@@ -3,7 +3,7 @@
 import numpy as np
 from typing import Callable, Literal
 
-InterpMethodType = Literal["zero", "linear", "cubic"]
+InterpMethodType = Literal["zero", "linear", "quadratic", "cubic"]
 InterpFuncType = Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]
 
 
@@ -48,6 +48,21 @@ def interp_linear(tq: np.ndarray, tk: np.ndarray, knots: np.ndarray) -> np.ndarr
     return v0 + alpha[None, :, None] * (v1 - v0)
 
 
+def interp_quadratic(tq: np.ndarray, tk: np.ndarray, knots: np.ndarray) -> np.ndarray:
+    """Quadratic spline interpolation.
+
+    This matches DIAL-MPC's k=2 node-to-action interpolation.
+    """
+    from scipy.interpolate import make_interp_spline
+
+    num_rollouts = knots.shape[0]
+    result = np.zeros((num_rollouts, len(tq), knots.shape[2]), dtype=knots.dtype)
+    for i in range(num_rollouts):
+        spline = make_interp_spline(tk, knots[i], k=2, axis=0)
+        result[i] = spline(tq)
+    return result
+
+
 def interp_cubic(tq: np.ndarray, tk: np.ndarray, knots: np.ndarray) -> np.ndarray:
     """Cubic spline interpolation.
 
@@ -73,7 +88,7 @@ def get_interp_func(method: InterpMethodType) -> InterpFuncType:
     """Get the interpolation function for the specified method.
 
     Args:
-        method: "zero", "linear", or "cubic".
+        method: "zero", "linear", "quadratic", or "cubic".
 
     Returns:
         Interpolation function with signature (tq, tk, knots) -> controls.
@@ -82,10 +97,12 @@ def get_interp_func(method: InterpMethodType) -> InterpFuncType:
         return interp_zero
     elif method == "linear":
         return interp_linear
+    elif method == "quadratic":
+        return interp_quadratic
     elif method == "cubic":
         return interp_cubic
     else:
         raise ValueError(
             f"Unknown interpolation method: {method}. "
-            "Expected one of ['zero', 'linear', 'cubic']."
+            "Expected one of ['zero', 'linear', 'quadratic', 'cubic']."
         )

@@ -125,7 +125,7 @@ def visualize_learned_value(
     Parameters
     ----------
     controller:
-        A ``ValueGuidedMPPI`` instance (must have ``.learned_value``).
+        A ``ValueGuidedMPPI`` instance (must have ``.value_model``).
     step:
         Current simulation step (used in filename and title).
     resolution:
@@ -159,7 +159,7 @@ def visualize_learned_value(
     best_rollout_linewidth:
         Line width of the lowest-cost trajectory.
     """
-    lv = controller.learned_value
+    lv = controller.value_model
     x0, x1 = xlim if xlim is not None else (lv.grid_min, lv.grid_max)
     y0, y1 = ylim if ylim is not None else (lv.grid_min, lv.grid_max)
 
@@ -242,7 +242,7 @@ def visualize_learned_value_3d(
     slice_value:
         The value at which to slice the held-fixed dimension.
     """
-    lv = controller.learned_value
+    lv = controller.value_model
     grid_min = lv.grid_min
     grid_max = lv.grid_max
 
@@ -381,7 +381,7 @@ def visualize_learned_value_3d_scatter(
         If set, only show points with value below this threshold.
         Helps declutter the plot by hiding high-cost regions.
     """
-    lv = controller.learned_value
+    lv = controller.value_model
     x0, x1 = xlim if xlim is not None else (lv.grid_min, lv.grid_max)
     y0, y1 = ylim if ylim is not None else (lv.grid_min, lv.grid_max)
     z0, z1 = zlim if zlim is not None else (lv.grid_min, lv.grid_max)

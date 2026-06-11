@@ -1,0 +1,119 @@
+{
+  "task_name": "ant",
+  "controller_names": [
+    "MPPI",
+    "Density-Guided MPPI (KDE)",
+    "Density-Guided MPPI (KNN)"
+  ],
+  "config": {
+    "horizons": [
+      0.5,
+      0.8888888888888888,
+      1.2777777777777777,
+      1.6666666666666667,
+      2.0555555555555554,
+      2.4444444444444446,
+      2.8333333333333335,
+      3.2222222222222223,
+      3.611111111111111,
+      4.0
+    ],
+    "num_samples_list": [
+      128,
+      341,
+      554,
+      768,
+      981,
+      1194,
+      1408,
+      1621,
+      1834,
+      2048
+    ],
+    "sweep_horizon_for_samples": 2.0,
+    "num_trials": 20,
+    "frequency": 50.0,
+    "goal_threshold": 0.5,
+    "max_iterations": 10000,
+    "record_video": false,
+    "video_trial_index": 0,
+    "output_tag": "ant_mppi_vs_density_kde_vs_knn",
+    "pretrain_weights_dir": null,
+    "controller_params": {
+      "shared": {
+        "noise_level": 0.3,
+        "temperature": 1e-05,
+        "num_knots": 16,
+        "iterations": 1,
+        "seed": 0,
+        "num_samples_default": 1024
+      },
+      "density": {
+        "num_knots_per_stage": 4,
+        "inverse_density_power": 1.0
+      },
+      "kde_density": {
+        "kde_bandwidth": 0.1
+      },
+      "knn_density": {
+        "knn_k": 5,
+        "position_weight": 1.0,
+        "angle_weight": 1.0,
+        "linear_velocity_weight": 1.0,
+        "angular_velocity_weight": 1.0
+      }
+    },
+    "parallel": "all",
+    "max_workers": "10",
+    "num_gpus": 1,
+    "freq_calibration_iters": 50
+  },
+  "horizons": [
+    0.5,
+    0.8888888955116272,
+    1.2777777910232544,
+    1.6666666269302368,
+    2.055555582046509,
+    2.444444417953491,
+    2.8333332538604736,
+    3.222222328186035,
+    3.6111111640930176,
+    4.0
+  ],
+  "num_samples_list": [
+    128,
+    341,
+    554,
+    768,
+    981,
+    1194,
+    1408,
+    1621,
+    1834,
+    2048
+  ],
+  "controller_params": {
+    "shared": {
+      "noise_level": 0.3,
+      "temperature": 1e-05,
+      "num_knots": 16,
+      "iterations": 1,
+      "seed": 0,
+      "num_samples_default": 1024
+    },
+    "density": {
+      "num_knots_per_stage": 4,
+      "inverse_density_power": 1.0
+    },
+    "kde_density": {
+      "kde_bandwidth": 0.1
+    },
+    "knn_density": {
+      "knn_k": 5,
+      "position_weight": 1.0,
+      "angle_weight": 1.0,
+      "linear_velocity_weight": 1.0,
+      "angular_velocity_weight": 1.0
+    }
+  }
+}

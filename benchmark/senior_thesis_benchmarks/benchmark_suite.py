@@ -391,18 +391,19 @@ class SeniorThesisBenchmarkSuite:
         self,
         controller_factory: Callable[[ControllerSpec, object, float], object],
     ) -> None:
-        """Pre-train all learned value controllers sequentially before parallel runs."""
+        """Pre-construct all learned value controllers sequentially before parallel runs.
+
+        Each value-guided factory pretrains-or-loads on construction, so this
+        ensures the weights file is written exactly once (in the main process)
+        before subprocess workers race for it.
+        """
         for spec in self.controller_specs:
             if not any(kw in spec.name.lower() for kw in ("value",)):
                 continue
+            print(f"Pre-constructing {spec.name} before parallel runs...")
             task = self.task_factory()
-            controller = controller_factory(spec, task, 1.0)
-            weights_path = self._learned_value_weights_path(controller, spec)
-            if weights_path is not None and weights_path.exists():
-                continue
-            print(f"Pre-training {spec.name} before parallel runs...")
-            self._prepare_controller(controller, spec)
-            del controller, task
+            controller_factory(spec, task, 1.0)
+            del task
 
     def _warmup_warp_cache(
         self,
@@ -449,7 +450,6 @@ class SeniorThesisBenchmarkSuite:
         """Run benchmark for a single (controller, axis_value) pair."""
         task = self.task_factory()
         controller = controller_factory(spec, task, float(axis_value))
-        self._prepare_controller(controller, spec)
 
         mj_model = task.mj_model
         mj_data = mujoco.MjData(mj_model)
@@ -494,7 +494,6 @@ class SeniorThesisBenchmarkSuite:
 
                 task = self.task_factory()
                 controller = controller_factory(spec, task, float(axis_value))
-                self._prepare_controller(controller, spec)
 
                 mj_model = task.mj_model
                 mj_data = mujoco.MjData(mj_model)
@@ -747,37 +746,6 @@ class SeniorThesisBenchmarkSuite:
             control_store=control_store,
             trace_store=trace_store,
         )
-
-    def _prepare_controller(self, controller: object, spec: ControllerSpec) -> None:
-        if not hasattr(controller, "pretrain_learned_value"):
-            return
-
-        weights_path = self._learned_value_weights_path(controller, spec)
-        if weights_path is not None and weights_path.exists():
-            print(f"Loading pretrained learned value weights from {weights_path}")
-            controller.load_pretrained_value_weights(weights_path)
-            return
-
-        trained = controller.pretrain_learned_value(verbose=True)
-        if trained and weights_path is not None:
-            controller.save_pretrained_value_weights(weights_path)
-            print(f"Saved pretrained learned value weights to {weights_path}")
-
-    def _learned_value_weights_path(
-        self,
-        controller: object,
-        spec: ControllerSpec,
-    ) -> Optional[Path]:
-        if self.config.pretrain_weights_dir is None:
-            return None
-
-        weights_dir = Path(self.config.pretrain_weights_dir)
-        weights_dir.mkdir(parents=True, exist_ok=True)
-
-        key = getattr(controller, "pretrained_value_key", None)
-        if key is None:
-            key = f"{self.task_name}_{spec.name}"
-        return weights_dir / f"{self._slugify(str(key))}.pt"
 
     def _save_results(
         self,
