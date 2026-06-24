@@ -42,6 +42,8 @@ class ValueDensityGuidedMPPI(ValueGuidedMPPI, DensityGuidedMPPI):
         value_model: ValueModel,
         density_model: Optional[DensityModel] = None,
         num_knots_per_stage: int = 4,
+        resample_cost_weight: float = 1.0,
+        resample_cost_temperature: Optional[float] = None,
         state_extract_fn: Optional[Callable] = None,
         state_dim: Optional[int] = None,
         online_learning_rate: float = 1e-3,
@@ -61,6 +63,8 @@ class ValueDensityGuidedMPPI(ValueGuidedMPPI, DensityGuidedMPPI):
             seed=seed,
             density_model=density_model,
             num_knots_per_stage=num_knots_per_stage,
+            resample_cost_weight=resample_cost_weight,
+            resample_cost_temperature=resample_cost_temperature,
             state_extract_fn=state_extract_fn,
             state_dim=state_dim,
         )

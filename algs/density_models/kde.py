@@ -20,6 +20,8 @@ class KDEDensityModel(DensityModel):
     `bandwidth` may be a scalar (broadcast to all state dimensions) or an
     array of length state_dim.  `alpha` controls how strongly samples in
     low-density regions are favoured (α=1 full inverse-density, α=0 uniform).
+    DensityGuidedMPPI can additionally multiply the resampling weights by a
+    low-cost softmax factor at each stage boundary.
     """
 
     def __init__(
@@ -119,6 +121,83 @@ class KDEDensityModel(DensityModel):
         wp.launch(kernel, dim=1, inputs=[
             self._density_wp, indices_wp, self._offsets_wp,
             int(stage_idx), self._num_samples, self.alpha,
+        ])
+
+    def launch_resample_with_cost(
+        self,
+        costs_wp: wp.array,
+        indices_wp: wp.array,
+        stage_idx: int,
+        cost_temperature: float,
+        cost_weight: float,
+    ) -> None:
+        """Systematic resample with weights ∝ inverse-density × low-cost."""
+        kernel = getattr(type(self), "_resample_from_density_and_cost_kernel", None)
+        if kernel is None:
+            @wp.kernel
+            def resample_from_density_and_cost(
+                density:          wp.array1d(dtype=wp.float32),  # (N,)
+                costs:            wp.array1d(dtype=wp.float32),  # (N,)
+                indices:          wp.array1d(dtype=wp.int32),    # (N,) output
+                offsets:          wp.array1d(dtype=wp.float32),  # (n_boundaries,)
+                stage_idx:        int,
+                N:                int,
+                alpha:            float,
+                cost_temperature: float,
+                cost_weight:      float,
+            ):
+                tid = wp.tid()
+                if tid > 0:
+                    return
+
+                min_cost = costs[0]
+                for j_min in range(1, N):
+                    if costs[j_min] < min_cost:
+                        min_cost = costs[j_min]
+
+                eps = float(1.0e-6)
+                total = float(0.0)
+                for j in range(N):
+                    density_w = wp.pow(1.0 / (density[j] + eps), alpha)
+                    cost_w = wp.exp(
+                        -cost_weight * (costs[j] - min_cost) / cost_temperature
+                    )
+                    total = total + density_w * cost_w
+
+                # Systematic resampling: one random phase, then N evenly spaced thresholds.
+                u = offsets[stage_idx]
+                step = 1.0 / float(N)
+                cumulative = float(0.0)
+                j = int(0)
+
+                for i in range(N):
+                    threshold = u + float(i) * step
+                    can_advance = int(1)
+                    while can_advance == 1:
+                        if j >= N - 1:
+                            can_advance = 0
+                        else:
+                            density_w = wp.pow(1.0 / (density[j] + eps), alpha)
+                            cost_w = wp.exp(
+                                -cost_weight * (costs[j] - min_cost) / cost_temperature
+                            )
+                            w_j = density_w * cost_w / total
+                            if cumulative + w_j < threshold:
+                                cumulative = cumulative + w_j
+                                j = j + 1
+                            else:
+                                can_advance = 0
+                    indices[i] = j
+
+            type(self)._resample_from_density_and_cost_kernel = (
+                resample_from_density_and_cost
+            )
+            kernel = resample_from_density_and_cost
+
+        wp.launch(kernel, dim=1, inputs=[
+            self._density_wp, costs_wp, indices_wp, self._offsets_wp,
+            int(stage_idx), self._num_samples, self.alpha,
+            float(cost_temperature), float(cost_weight),
         ])
 
     # ── Helpers ───────────────────────────────────────────────────────

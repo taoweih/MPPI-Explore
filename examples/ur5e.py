@@ -28,7 +28,8 @@ from utils.visualize_learned_value import (
 WEIGHTS_DIR = (
     Path(__file__).resolve().parents[1]
     / "benchmark"
-    / "senior_thesis_benchmarks"
+    / "senior_thesis"
+    / "data"
     / "saved_pretrain_weights"
 )
 

@@ -18,5 +18,16 @@ AGENTS.md
 # Recordings
 recordings/
 
+# Generated benchmark outputs and local archives
+archive/
+benchmark/**/data/runs/**
+benchmark/**/data/plots/**
+!benchmark/**/data/runs/.gitkeep
+!benchmark/**/data/plots/.gitkeep
+MUJOCO_LOG.TXT
+**/MUJOCO_LOG.TXT
+
 # OS
 .DS_Store
+
+tmp.py

@@ -35,6 +35,24 @@ class DensityModel(ABC):
         """Systematic resample.  Writes into `indices_wp` shape (N,);
         reads internal density buffer and the `stage_idx`-th stochastic offset."""
 
+    def launch_resample_with_cost(
+        self,
+        costs_wp: wp.array,
+        indices_wp: wp.array,
+        stage_idx: int,
+        cost_temperature: float,
+        cost_weight: float,
+    ) -> None:
+        """Systematic resample using inverse density and low rollout cost.
+
+        Implementations should use weights proportional to their existing
+        inverse-density weight multiplied by a low-cost preference, typically
+        ``exp(-cost_weight * (J_i - min_j J_j) / cost_temperature)``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support cost-aware resampling."
+        )
+
     @abstractmethod
     def randomize_offsets(self, rng: np.random.Generator) -> None:
         """Pre-call: refill stochastic inputs for the next captured-graph replay.

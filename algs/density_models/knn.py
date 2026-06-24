@@ -22,6 +22,21 @@ class KNNDensityModel(DensityModel):
       - slide joint: scalar position distance, linear velocity
       - hinge joint: wrapped angular distance, angular velocity
 
+    Distances are normalized by the current rollout batch before the kNN
+    radius is measured.  For each semantic component `c` of each joint
+    (position, orientation angle, linear velocity, angular velocity, and
+    optional task-state dimensions), compute the pairwise RMS spread
+
+        sigma_c = sqrt( sum_{a != b} delta_c(a, b)^2 / (2 N (N - 1)) )
+
+    and use
+
+        d(i, j)^2 = sum_c w_c^2 * delta_c(i, j)^2 / max(sigma_c, eps)^2.
+
+    This keeps prismatic, angular, velocity, and task-state coordinates
+    comparable within the current resampling batch while preserving the
+    joint-aware angle/quaternion distance definitions below.
+
     Density is the standard kNN estimate up to constants:
 
         rho_i ∝ 1 / r_k(s_i)^D
@@ -31,7 +46,8 @@ class KNNDensityModel(DensityModel):
     output to the density state, i.e. `[qpos, qvel, task_state]`.
     The density-guided controller then resamples with weights
     `(1 / (rho_i + eps)) ** alpha`, so lower-density states are copied forward
-    more often.
+    more often. DensityGuidedMPPI can additionally multiply those weights by a
+    low-cost softmax factor at each stage boundary.
     """
 
     K_MAX = 64
@@ -46,11 +62,14 @@ class KNNDensityModel(DensityModel):
         angular_velocity_weight: float = 1.0,
         include_task_state: bool = False,
         task_state_weight: float = 1.0,
+        min_scale: float = 1.0e-6,
     ) -> None:
         if k < 1:
             raise ValueError(f"k must be >= 1; got {k}")
         if k > self.K_MAX:
             raise ValueError(f"k={k} exceeds K_MAX={self.K_MAX}")
+        if min_scale <= 0.0:
+            raise ValueError(f"min_scale must be > 0; got {min_scale}")
 
         self.k = int(k)
         self.alpha = float(alpha)
@@ -60,6 +79,7 @@ class KNNDensityModel(DensityModel):
         self.angular_velocity_weight = float(angular_velocity_weight)
         self.include_task_state = bool(include_task_state)
         self.task_state_weight = float(task_state_weight)
+        self.min_scale = float(min_scale)
 
         # Filled by configure_from_task()/configure_from_model(), which
         # DensityGuidedMPPI calls.
@@ -82,6 +102,11 @@ class KNNDensityModel(DensityModel):
         self._joint_type_wp: Optional[wp.array] = None
         self._qposadr_wp: Optional[wp.array] = None
         self._dofadr_wp: Optional[wp.array] = None
+        self._position_scale_wp: Optional[wp.array] = None
+        self._angle_scale_wp: Optional[wp.array] = None
+        self._linear_velocity_scale_wp: Optional[wp.array] = None
+        self._angular_velocity_scale_wp: Optional[wp.array] = None
+        self._task_state_scale_wp: Optional[wp.array] = None
 
     # ── Math ──────────────────────────────────────────────────────────
 
@@ -155,6 +180,259 @@ class KNNDensityModel(DensityModel):
 
     def launch_compute(self, states_wp: wp.array) -> None:
         """Compute joint-aware kNN density for each configured state sample."""
+        zero_scale_kernel = getattr(type(self), "_zero_semantic_scale_kernel", None)
+        if zero_scale_kernel is None:
+            @wp.kernel
+            def zero_semantic_scale(
+                position_scale: wp.array1d(dtype=wp.float32),
+                angle_scale:    wp.array1d(dtype=wp.float32),
+                linvel_scale:   wp.array1d(dtype=wp.float32),
+                angvel_scale:   wp.array1d(dtype=wp.float32),
+                task_scale:     wp.array1d(dtype=wp.float32),
+                num_joints:     int,
+                task_state_dim: int,
+            ):
+                tid = wp.tid()
+
+                if tid < num_joints:
+                    position_scale[tid] = float(0.0)
+                    angle_scale[tid] = float(0.0)
+                    linvel_scale[tid] = float(0.0)
+                    angvel_scale[tid] = float(0.0)
+                    return
+
+                task_d = tid - num_joints
+                if task_d < task_state_dim:
+                    task_scale[task_d] = float(0.0)
+
+            type(self)._zero_semantic_scale_kernel = zero_semantic_scale
+            zero_scale_kernel = zero_semantic_scale
+
+        accumulate_scale_kernel = getattr(
+            type(self), "_accumulate_semantic_scale_kernel", None,
+        )
+        if accumulate_scale_kernel is None:
+            @wp.kernel
+            def accumulate_semantic_scale(
+                states:         wp.array2d(dtype=wp.float32),
+                position_sum:   wp.array1d(dtype=wp.float32),
+                angle_sum:      wp.array1d(dtype=wp.float32),
+                linvel_sum:     wp.array1d(dtype=wp.float32),
+                angvel_sum:     wp.array1d(dtype=wp.float32),
+                task_sum:       wp.array1d(dtype=wp.float32),
+                joint_type:     wp.array1d(dtype=wp.int32),
+                qposadr:        wp.array1d(dtype=wp.int32),
+                dofadr:         wp.array1d(dtype=wp.int32),
+                N:              int,
+                nq:             int,
+                nv:             int,
+                num_joints:     int,
+                task_state_dim: int,
+            ):
+                tid = wp.tid()
+                component = tid // N
+                a = tid - component * N
+                PI = float(3.141592653589793)
+                TWO_PI = float(6.283185307179586)
+
+                if component < num_joints:
+                    jt = joint_type[component]
+                    qp = qposadr[component]
+                    dv = dofadr[component]
+
+                    pos_local = float(0.0)
+                    angle_local = float(0.0)
+                    linvel_local = float(0.0)
+                    angvel_local = float(0.0)
+
+                    for b in range(N):
+                        if a == b:
+                            continue
+
+                        if jt == 0:  # free
+                            pos_sq = float(0.0)
+                            for d in range(3):
+                                diff = states[a, qp + d] - states[b, qp + d]
+                                pos_sq = pos_sq + diff * diff
+                            pos_local = pos_local + pos_sq
+
+                            dot = (
+                                states[a, qp + 3] * states[b, qp + 3]
+                                + states[a, qp + 4] * states[b, qp + 4]
+                                + states[a, qp + 5] * states[b, qp + 5]
+                                + states[a, qp + 6] * states[b, qp + 6]
+                            )
+                            if dot < 0.0:
+                                dot = -dot
+                            dot = wp.clamp(dot, 0.0, 1.0)
+                            angle = 2.0 * wp.acos(dot)
+                            angle_local = angle_local + angle * angle
+
+                            linvel_sq = float(0.0)
+                            for d in range(3):
+                                diff = states[a, nq + dv + d] - states[b, nq + dv + d]
+                                linvel_sq = linvel_sq + diff * diff
+                            linvel_local = linvel_local + linvel_sq
+
+                            angvel_sq = float(0.0)
+                            for d in range(3, 6):
+                                diff = states[a, nq + dv + d] - states[b, nq + dv + d]
+                                angvel_sq = angvel_sq + diff * diff
+                            angvel_local = angvel_local + angvel_sq
+
+                        elif jt == 1:  # ball
+                            dot = (
+                                states[a, qp] * states[b, qp]
+                                + states[a, qp + 1] * states[b, qp + 1]
+                                + states[a, qp + 2] * states[b, qp + 2]
+                                + states[a, qp + 3] * states[b, qp + 3]
+                            )
+                            if dot < 0.0:
+                                dot = -dot
+                            dot = wp.clamp(dot, 0.0, 1.0)
+                            angle = 2.0 * wp.acos(dot)
+                            angle_local = angle_local + angle * angle
+
+                            angvel_sq = float(0.0)
+                            for d in range(3):
+                                diff = states[a, nq + dv + d] - states[b, nq + dv + d]
+                                angvel_sq = angvel_sq + diff * diff
+                            angvel_local = angvel_local + angvel_sq
+
+                        elif jt == 2:  # slide
+                            diff = states[a, qp] - states[b, qp]
+                            pos_local = pos_local + diff * diff
+
+                            vdiff = states[a, nq + dv] - states[b, nq + dv]
+                            linvel_local = linvel_local + vdiff * vdiff
+
+                        else:  # hinge
+                            diff = states[a, qp] - states[b, qp]
+                            diff = diff - TWO_PI * wp.floor((diff + PI) / TWO_PI)
+                            angle_local = angle_local + diff * diff
+
+                            vdiff = states[a, nq + dv] - states[b, nq + dv]
+                            angvel_local = angvel_local + vdiff * vdiff
+
+                    wp.atomic_add(position_sum, component, pos_local)
+                    wp.atomic_add(angle_sum, component, angle_local)
+                    wp.atomic_add(linvel_sum, component, linvel_local)
+                    wp.atomic_add(angvel_sum, component, angvel_local)
+                    return
+
+                task_d = component - num_joints
+                if task_d < task_state_dim:
+                    offset = nq + nv
+                    task_local = float(0.0)
+                    for b in range(N):
+                        if a == b:
+                            continue
+                        diff = states[a, offset + task_d] - states[b, offset + task_d]
+                        task_local = task_local + diff * diff
+                    wp.atomic_add(task_sum, task_d, task_local)
+
+            type(self)._accumulate_semantic_scale_kernel = accumulate_semantic_scale
+            accumulate_scale_kernel = accumulate_semantic_scale
+
+        finalize_scale_kernel = getattr(type(self), "_finalize_semantic_scale_kernel", None)
+        if finalize_scale_kernel is None:
+            @wp.kernel
+            def finalize_semantic_scale(
+                position_scale: wp.array1d(dtype=wp.float32),
+                angle_scale:    wp.array1d(dtype=wp.float32),
+                linvel_scale:   wp.array1d(dtype=wp.float32),
+                angvel_scale:   wp.array1d(dtype=wp.float32),
+                task_scale:     wp.array1d(dtype=wp.float32),
+                N:              int,
+                num_joints:     int,
+                task_state_dim: int,
+                min_scale:      float,
+            ):
+                tid = wp.tid()
+
+                if N <= 1:
+                    if tid < num_joints:
+                        position_scale[tid] = float(1.0)
+                        angle_scale[tid] = float(1.0)
+                        linvel_scale[tid] = float(1.0)
+                        angvel_scale[tid] = float(1.0)
+                    else:
+                        task_d = tid - num_joints
+                        if task_d < task_state_dim:
+                            task_scale[task_d] = float(1.0)
+                    return
+
+                denom = 2.0 * float(N) * float(N - 1)
+
+                if tid < num_joints:
+                    pos_scale = wp.sqrt(position_scale[tid] / denom)
+                    angle_scale_v = wp.sqrt(angle_scale[tid] / denom)
+                    linvel_scale_v = wp.sqrt(linvel_scale[tid] / denom)
+                    angvel_scale_v = wp.sqrt(angvel_scale[tid] / denom)
+
+                    if pos_scale < min_scale:
+                        pos_scale = min_scale
+                    if angle_scale_v < min_scale:
+                        angle_scale_v = min_scale
+                    if linvel_scale_v < min_scale:
+                        linvel_scale_v = min_scale
+                    if angvel_scale_v < min_scale:
+                        angvel_scale_v = min_scale
+
+                    position_scale[tid] = pos_scale
+                    angle_scale[tid] = angle_scale_v
+                    linvel_scale[tid] = linvel_scale_v
+                    angvel_scale[tid] = angvel_scale_v
+                    return
+
+                task_d = tid - num_joints
+                if task_d < task_state_dim:
+                    scale = wp.sqrt(task_scale[task_d] / denom)
+                    if scale < min_scale:
+                        scale = min_scale
+                    task_scale[task_d] = scale
+
+            type(self)._finalize_semantic_scale_kernel = finalize_semantic_scale
+            finalize_scale_kernel = finalize_semantic_scale
+
+        scale_dim = self._num_joints + self._task_state_dim
+        wp.launch(zero_scale_kernel, dim=scale_dim, inputs=[
+            self._position_scale_wp,
+            self._angle_scale_wp,
+            self._linear_velocity_scale_wp,
+            self._angular_velocity_scale_wp,
+            self._task_state_scale_wp,
+            self._num_joints,
+            self._task_state_dim,
+        ])
+        wp.launch(accumulate_scale_kernel, dim=scale_dim * self._num_samples, inputs=[
+            states_wp,
+            self._position_scale_wp,
+            self._angle_scale_wp,
+            self._linear_velocity_scale_wp,
+            self._angular_velocity_scale_wp,
+            self._task_state_scale_wp,
+            self._joint_type_wp,
+            self._qposadr_wp,
+            self._dofadr_wp,
+            self._num_samples,
+            self._nq,
+            self._nv,
+            self._num_joints,
+            self._task_state_dim,
+        ])
+        wp.launch(finalize_scale_kernel, dim=scale_dim, inputs=[
+            self._position_scale_wp,
+            self._angle_scale_wp,
+            self._linear_velocity_scale_wp,
+            self._angular_velocity_scale_wp,
+            self._task_state_scale_wp,
+            self._num_samples,
+            self._num_joints,
+            self._task_state_dim,
+            self.min_scale,
+        ])
+
         kernel = getattr(type(self), "_joint_knn_density_kernel", None)
         if kernel is None:
             @wp.kernel
@@ -162,6 +440,11 @@ class KNNDensityModel(DensityModel):
                 states:        wp.array2d(dtype=wp.float32),  # (N, state_dim)
                 density:       wp.array1d(dtype=wp.float32),  # (N,) output
                 dists_scratch: wp.array2d(dtype=wp.float32),  # (N, K_MAX)
+                position_scale: wp.array1d(dtype=wp.float32),
+                angle_scale:   wp.array1d(dtype=wp.float32),
+                linvel_scale:  wp.array1d(dtype=wp.float32),
+                angvel_scale:  wp.array1d(dtype=wp.float32),
+                task_scale:    wp.array1d(dtype=wp.float32),
                 joint_type:    wp.array1d(dtype=wp.int32),
                 qposadr:       wp.array1d(dtype=wp.int32),
                 dofadr:        wp.array1d(dtype=wp.int32),
@@ -198,9 +481,10 @@ class KNNDensityModel(DensityModel):
                         dv = dofadr[joint]
 
                         if jt == 0:  # free: xyz + quaternion, linear + angular velocity
+                            pos_inv_scale = position_w / position_scale[joint]
                             for d in range(3):
                                 diff = states[i, qp + d] - states[j, qp + d]
-                                dist_sq = dist_sq + position_w * position_w * diff * diff
+                                dist_sq = dist_sq + pos_inv_scale * pos_inv_scale * diff * diff
 
                             dot = (
                                 states[i, qp + 3] * states[j, qp + 3]
@@ -212,14 +496,23 @@ class KNNDensityModel(DensityModel):
                                 dot = -dot
                             dot = wp.clamp(dot, 0.0, 1.0)
                             angle = 2.0 * wp.acos(dot)
-                            dist_sq = dist_sq + angle_w * angle_w * angle * angle
+                            angle_inv_scale = angle_w / angle_scale[joint]
+                            dist_sq = dist_sq + angle_inv_scale * angle_inv_scale * angle * angle
 
+                            linvel_inv_scale = linvel_w / linvel_scale[joint]
                             for d in range(3):
                                 diff = states[i, nq + dv + d] - states[j, nq + dv + d]
-                                dist_sq = dist_sq + linvel_w * linvel_w * diff * diff
+                                dist_sq = (
+                                    dist_sq
+                                    + linvel_inv_scale * linvel_inv_scale * diff * diff
+                                )
+                            angvel_inv_scale = angvel_w / angvel_scale[joint]
                             for d in range(3, 6):
                                 diff = states[i, nq + dv + d] - states[j, nq + dv + d]
-                                dist_sq = dist_sq + angvel_w * angvel_w * diff * diff
+                                dist_sq = (
+                                    dist_sq
+                                    + angvel_inv_scale * angvel_inv_scale * diff * diff
+                                )
 
                         elif jt == 1:  # ball: quaternion, angular velocity
                             dot = (
@@ -232,31 +525,44 @@ class KNNDensityModel(DensityModel):
                                 dot = -dot
                             dot = wp.clamp(dot, 0.0, 1.0)
                             angle = 2.0 * wp.acos(dot)
-                            dist_sq = dist_sq + angle_w * angle_w * angle * angle
+                            angle_inv_scale = angle_w / angle_scale[joint]
+                            dist_sq = dist_sq + angle_inv_scale * angle_inv_scale * angle * angle
 
+                            angvel_inv_scale = angvel_w / angvel_scale[joint]
                             for d in range(3):
                                 diff = states[i, nq + dv + d] - states[j, nq + dv + d]
-                                dist_sq = dist_sq + angvel_w * angvel_w * diff * diff
+                                dist_sq = (
+                                    dist_sq
+                                    + angvel_inv_scale * angvel_inv_scale * diff * diff
+                                )
 
                         elif jt == 2:  # slide: scalar position, linear velocity
                             diff = states[i, qp] - states[j, qp]
-                            dist_sq = dist_sq + position_w * position_w * diff * diff
+                            pos_inv_scale = position_w / position_scale[joint]
+                            dist_sq = (
+                                dist_sq
+                                + pos_inv_scale * pos_inv_scale * diff * diff
+                            )
                             vdiff = states[i, nq + dv] - states[j, nq + dv]
-                            dist_sq = dist_sq + linvel_w * linvel_w * vdiff * vdiff
+                            linvel_inv_scale = linvel_w / linvel_scale[joint]
+                            dist_sq = dist_sq + linvel_inv_scale * linvel_inv_scale * vdiff * vdiff
 
                         else:  # hinge: wrapped scalar angle, angular velocity
                             diff = states[i, qp] - states[j, qp]
                             diff = diff - TWO_PI * wp.floor((diff + PI) / TWO_PI)
-                            dist_sq = dist_sq + angle_w * angle_w * diff * diff
+                            angle_inv_scale = angle_w / angle_scale[joint]
+                            dist_sq = dist_sq + angle_inv_scale * angle_inv_scale * diff * diff
                             vdiff = states[i, nq + dv] - states[j, nq + dv]
-                            dist_sq = dist_sq + angvel_w * angvel_w * vdiff * vdiff
+                            angvel_inv_scale = angvel_w / angvel_scale[joint]
+                            dist_sq = dist_sq + angvel_inv_scale * angvel_inv_scale * vdiff * vdiff
 
                     task_offset = nq + nv
                     for d in range(task_state_dim):
                         diff = states[i, task_offset + d] - states[j, task_offset + d]
+                        task_inv_scale = task_state_w / task_scale[d]
                         dist_sq = (
                             dist_sq
-                            + task_state_w * task_state_w * diff * diff
+                            + task_inv_scale * task_inv_scale * diff * diff
                         )
 
                     max_idx = int(0)
@@ -289,6 +595,9 @@ class KNNDensityModel(DensityModel):
 
         wp.launch(kernel, dim=self._num_samples, inputs=[
             states_wp, self._density_wp, self._dists_scratch_wp,
+            self._position_scale_wp, self._angle_scale_wp,
+            self._linear_velocity_scale_wp, self._angular_velocity_scale_wp,
+            self._task_state_scale_wp,
             self._joint_type_wp, self._qposadr_wp, self._dofadr_wp,
             self._num_samples, self._nq, self._nv, self._num_joints, self.k,
             self._metric_dim, self._task_state_dim,
@@ -346,6 +655,83 @@ class KNNDensityModel(DensityModel):
         wp.launch(kernel, dim=1, inputs=[
             self._density_wp, indices_wp, self._offsets_wp,
             int(stage_idx), self._num_samples, self.alpha,
+        ])
+
+    def launch_resample_with_cost(
+        self,
+        costs_wp: wp.array,
+        indices_wp: wp.array,
+        stage_idx: int,
+        cost_temperature: float,
+        cost_weight: float,
+    ) -> None:
+        """Systematic resample with weights ∝ inverse-density × low-cost."""
+        kernel = getattr(type(self), "_resample_from_density_and_cost_kernel", None)
+        if kernel is None:
+            @wp.kernel
+            def resample_from_density_and_cost(
+                density:          wp.array1d(dtype=wp.float32),  # (N,)
+                costs:            wp.array1d(dtype=wp.float32),  # (N,)
+                indices:          wp.array1d(dtype=wp.int32),    # (N,) output
+                offsets:          wp.array1d(dtype=wp.float32),  # (n_boundaries,)
+                stage_idx:        int,
+                N:                int,
+                alpha:            float,
+                cost_temperature: float,
+                cost_weight:      float,
+            ):
+                tid = wp.tid()
+                if tid > 0:
+                    return
+
+                min_cost = costs[0]
+                for j_min in range(1, N):
+                    if costs[j_min] < min_cost:
+                        min_cost = costs[j_min]
+
+                eps = float(1.0e-6)
+                total = float(0.0)
+                for j in range(N):
+                    density_w = wp.pow(1.0 / (density[j] + eps), alpha)
+                    cost_w = wp.exp(
+                        -cost_weight * (costs[j] - min_cost) / cost_temperature
+                    )
+                    total = total + density_w * cost_w
+
+                # Systematic resampling: one random phase, then N evenly spaced thresholds.
+                u = offsets[stage_idx]
+                step = 1.0 / float(N)
+                cumulative = float(0.0)
+                j = int(0)
+
+                for i in range(N):
+                    threshold = u + float(i) * step
+                    can_advance = int(1)
+                    while can_advance == 1:
+                        if j >= N - 1:
+                            can_advance = 0
+                        else:
+                            density_w = wp.pow(1.0 / (density[j] + eps), alpha)
+                            cost_w = wp.exp(
+                                -cost_weight * (costs[j] - min_cost) / cost_temperature
+                            )
+                            w_j = density_w * cost_w / total
+                            if cumulative + w_j < threshold:
+                                cumulative = cumulative + w_j
+                                j = j + 1
+                            else:
+                                can_advance = 0
+                    indices[i] = j
+
+            type(self)._resample_from_density_and_cost_kernel = (
+                resample_from_density_and_cost
+            )
+            kernel = resample_from_density_and_cost
+
+        wp.launch(kernel, dim=1, inputs=[
+            self._density_wp, costs_wp, indices_wp, self._offsets_wp,
+            int(stage_idx), self._num_samples, self.alpha,
+            float(cost_temperature), float(cost_weight),
         ])
 
     # ── Helpers ───────────────────────────────────────────────────────
@@ -421,6 +807,22 @@ class KNNDensityModel(DensityModel):
         self._qposadr_wp.assign(self._qposadr_np)
         self._dofadr_wp = wp.zeros(self._num_joints, dtype=wp.int32, device=device)
         self._dofadr_wp.assign(self._dofadr_np)
+
+        self._position_scale_wp = wp.zeros(
+            self._num_joints, dtype=wp.float32, device=device,
+        )
+        self._angle_scale_wp = wp.zeros(
+            self._num_joints, dtype=wp.float32, device=device,
+        )
+        self._linear_velocity_scale_wp = wp.zeros(
+            self._num_joints, dtype=wp.float32, device=device,
+        )
+        self._angular_velocity_scale_wp = wp.zeros(
+            self._num_joints, dtype=wp.float32, device=device,
+        )
+        self._task_state_scale_wp = wp.zeros(
+            max(self._task_state_dim, 1), dtype=wp.float32, device=device,
+        )
 
     def randomize_offsets(self, rng: np.random.Generator) -> None:
         """Refill the per-stage U[0, 1/N) offsets for systematic resampling."""

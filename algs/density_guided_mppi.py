@@ -10,7 +10,8 @@ Algorithm (one optimize step):
                (a) physics for stage's timesteps          → accumulate running cost
                (b) extract density state s_i                 via task/model extractor
                (c) density_model.launch_compute(s)          ρ(s_i)
-               (d) density_model.launch_resample(idx, n)    idx ∝ resample(1/ρ^α)
+               (d) density_model.launch_resample_with_cost(idx, n)
+                       idx ∝ resample((1/ρ^α) · exp(-η(J_stage - J_min)/λ_stage))
                (e) reshuffle (controls, knots, qpos, qvel, time) by idx
                (f) regenerate trailing knots
                        K[k_start:, :] ← clip(μ + σ · 𝒩)
@@ -121,6 +122,8 @@ class DensityGuidedMPPI(BaseMPPI):
         # ── density-guided specific ──
         density_model: Optional[DensityModel] = None,
         num_knots_per_stage: int = 4,
+        resample_cost_weight: float = 1.0,
+        resample_cost_temperature: Optional[float] = None,
         # ── optional: override the state extraction used for density estimation ──
         state_extract_fn: Optional[Callable] = None,
         state_dim: Optional[int] = None,
@@ -150,6 +153,23 @@ class DensityGuidedMPPI(BaseMPPI):
         )
 
         self.num_knots_per_stage = num_knots_per_stage
+        self.resample_cost_weight = float(resample_cost_weight)
+        if self.resample_cost_weight < 0.0:
+            raise ValueError(
+                "resample_cost_weight must be >= 0.0; "
+                f"got {self.resample_cost_weight}"
+            )
+        self.resample_cost_temperature = (
+            float(self.temperature)
+            if resample_cost_temperature is None
+            else float(resample_cost_temperature)
+        )
+        if self.resample_cost_weight > 0.0 and self.resample_cost_temperature <= 0.0:
+            raise ValueError(
+                "resample_cost_temperature must be > 0.0 when "
+                "resample_cost_weight > 0.0."
+            )
+
         self.density_model = density_model or KDEDensityModel(bandwidth=1.0)
         configure_density_model_from_task = getattr(
             self.density_model, "configure_from_task", None,
@@ -247,7 +267,7 @@ class DensityGuidedMPPI(BaseMPPI):
             (a) physics for stage's timesteps         → accumulate running cost
             (b) state s_i = density/task extract_state(...)
             (c) density_model.launch_compute(s)         ρ(s_i)
-            (d) density_model.launch_resample(idx, n)   idx ∝ resample(1/ρ^α)
+            (d) resample idx with inverse-density and low stage-cost weights
             (e) reshuffle (controls, knots, qpos, qvel, time) by idx
             (f) regenerate trailing knots; re-interp controls (ZOH)
         Final stage: physics only, then task terminal cost.
@@ -291,7 +311,7 @@ class DensityGuidedMPPI(BaseMPPI):
                 )
                 self._extract_density_state()
                 self.density_model.launch_compute(self._states_wp)
-                self.density_model.launch_resample(self._indices_wp, stage_idx=n)
+                self._launch_stage_resample(stage_idx=n)
 
                 self._reshuffle_by_indices()
                 self._regenerate_trailing_knots(stage=n)
@@ -333,6 +353,20 @@ class DensityGuidedMPPI(BaseMPPI):
     # ══════════════════════════════════════════════════════════════════
     # Stage operations — one wp.launch per algorithm operation
     # ══════════════════════════════════════════════════════════════════
+
+    def _launch_stage_resample(self, stage_idx: int) -> None:
+        """Sample rollout ancestors using inverse density and optional cost."""
+        if self.resample_cost_weight <= 0.0:
+            self.density_model.launch_resample(self._indices_wp, stage_idx=stage_idx)
+            return
+
+        self.density_model.launch_resample_with_cost(
+            self._running_costs_wp,
+            self._indices_wp,
+            stage_idx=stage_idx,
+            cost_temperature=self.resample_cost_temperature,
+            cost_weight=self.resample_cost_weight,
+        )
 
     def _emit_terminal_cost(self) -> None:
         """Evaluate the task terminal cost into the terminal-cost buffer."""
