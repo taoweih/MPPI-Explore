@@ -55,6 +55,7 @@ OUTPUT_NAME = "ant_mppi_vs_density_kde_vs_knn_vs_knn_task_state"
 PARALLEL = "all"
 MAX_WORKERS = "40"  # int or "auto" (= total jobs in batch)
 NUM_GPUS = 2
+FREQ_CALIBRATION_ITERS = 50
 
 # Shared MPPI parameters
 NOISE_LEVEL = 0.3
@@ -271,6 +272,7 @@ def main() -> None:
         parallel=PARALLEL,
         max_workers=MAX_WORKERS,
         num_gpus=NUM_GPUS,
+        freq_calibration_iters=FREQ_CALIBRATION_ITERS,
         controller_params={
             "shared": {
                 "noise_level": NOISE_LEVEL,

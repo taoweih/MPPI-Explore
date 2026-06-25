@@ -81,8 +81,21 @@ For a normal local run on one GPU:
 
 ```bash
 python3 -m benchmark.paper.scripts.u_point_mass_density_knn_v_kde \
-  --parallel sequential \
-  --num-gpus 1
+  --parallel all \
+  --max-workers 4 \
+  --num-gpus 1 \
+  --freq-calibration-iters 50
+```
+
+The Go2 tracking-error paper benchmark supports the same scheduling options,
+but uses `--max-steps` instead of `--max-iterations`:
+
+```bash
+python3 -m benchmark.paper.scripts.go2_walk_tracking_error \
+  --parallel all \
+  --max-workers 4 \
+  --num-gpus 1 \
+  --freq-calibration-iters 50
 ```
 
 If you want local outputs outside the Git checkout:
@@ -94,6 +107,33 @@ python3 -m benchmark.paper.scripts.u_point_mass_density_knn_v_kde \
   --parallel sequential \
   --num-gpus 1
 ```
+
+## Paper Benchmark Parallelism
+
+All scripts under `benchmark/paper/scripts/` support:
+
+```text
+--parallel sequential|controllers|axis|all
+--max-workers <count>|auto
+--num-gpus <count>
+--freq-calibration-iters <count>
+```
+
+The parallel modes use one subprocess per controller/sweep point:
+
+- `controllers`: batch controllers together for each sweep-axis value.
+- `axis`: batch sweep-axis values together for each controller.
+- `all`: submit every controller/sweep-point combination together.
+- `sequential`: run in the main process without a separate calibration pass.
+
+`--max-workers` limits concurrent subprocesses. `--num-gpus` assigns workers
+round-robin across the GPUs visible through `CUDA_VISIBLE_DEVICES`.
+
+For parallel modes, control-frequency measurements collected during the batch
+are not used in final output. After both sweeps complete, the runner performs a
+sequential frequency calibration with exclusive GPU access and overwrites the
+frequency mean, standard deviation, and per-trial arrays. Set
+`--freq-calibration-iters 0` to disable this final pass.
 
 ## Delta Cluster Run
 
@@ -176,7 +216,19 @@ python3 -m benchmark.paper.scripts.u_point_mass_density_knn_v_kde \
   --num-gpus 2 \
   --parallel all \
   --max-workers 8 \
+  --freq-calibration-iters 50 \
   --no-record-video
+```
+
+The equivalent Go2 command is:
+
+```bash
+python3 -m benchmark.paper.scripts.go2_walk_tracking_error \
+  --output-root "$MPPI_BENCH_OUTPUT_ROOT" \
+  --num-gpus 2 \
+  --parallel all \
+  --max-workers 8 \
+  --freq-calibration-iters 50
 ```
 
 Submit it:

@@ -18,20 +18,29 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional, Union
 
 import mujoco
 import numpy as np
+from tqdm import tqdm
 
 from algs import MPPI, DensityGuidedMPPI, KNNDensityModel
 from benchmark.common.cli import add_output_root_arg
 from benchmark.common.paths import runs_dir
+from benchmark.senior_thesis.scripts.benchmark_suite import _mps_start, _mps_stop
 from tasks.go2_walk import Go2Walk
 
+
+_WORKER_FLAG = "--_benchmark_worker"
 
 # DIAL-MPC unitree_go2_trot.yaml task defaults.
 PLANNING_DT = 0.02
@@ -67,6 +76,12 @@ RESAMPLE_COST_WEIGHT = 1.0
 RESAMPLE_COST_TEMPERATURE = None  # None uses the controller temperature.
 
 OUTPUT_NAME = "go2_walk_tracking_error"
+
+# Parallelism: "sequential", "controllers", "axis", or "all".
+PARALLEL = "all"
+MAX_WORKERS = "20"  # int or "auto" (= total jobs in batch)
+NUM_GPUS = 2
+FREQ_CALIBRATION_ITERS = 50
 
 
 @dataclass(frozen=True)
@@ -246,6 +261,220 @@ def run_trial(
     return float(tracking_errors.mean()), float(control_hz)
 
 
+def run_point(
+    spec: ControllerSpec,
+    *,
+    horizon: float,
+    num_samples: int,
+    num_trials: int,
+    max_steps: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    tracking_trials = np.zeros(num_trials, dtype=np.float32)
+    frequency_trials = np.zeros(num_trials, dtype=np.float32)
+    for trial_idx in range(num_trials):
+        tracking, hz = run_trial(
+            spec,
+            horizon=horizon,
+            num_samples=num_samples,
+            trial_idx=trial_idx,
+            max_steps=max_steps,
+        )
+        tracking_trials[trial_idx] = tracking
+        frequency_trials[trial_idx] = hz
+    return tracking_trials, frequency_trials
+
+
+def _save_point_result(
+    path: str,
+    tracking_trials: np.ndarray,
+    frequency_trials: np.ndarray,
+) -> None:
+    np.savez(
+        path,
+        tracking_trials=tracking_trials,
+        frequency_trials=frequency_trials,
+    )
+
+
+def _load_point_result(path: str) -> tuple[np.ndarray, np.ndarray]:
+    with np.load(path, allow_pickle=False) as data:
+        return data["tracking_trials"].copy(), data["frequency_trials"].copy()
+
+
+def _worker_module_name() -> str:
+    if __spec__ is not None and __spec__.name is not None:
+        return __spec__.name
+    return __name__
+
+
+def _resolve_max_workers(
+    max_workers: Union[int, Literal["auto"]],
+    num_jobs: int,
+) -> int:
+    if max_workers == "auto":
+        return num_jobs
+    return min(int(max_workers), num_jobs)
+
+
+def _assign_worker_gpu(env: dict[str, str], gpu_id: int, num_gpus: int) -> None:
+    if num_gpus <= 1:
+        return
+    parent_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if parent_devices is None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        return
+    devices = [
+        device.strip()
+        for device in parent_devices.split(",")
+        if device.strip()
+    ]
+    if devices:
+        env["CUDA_VISIBLE_DEVICES"] = devices[gpu_id % len(devices)]
+
+
+def _launch_point_subprocess(
+    *,
+    module_name: str,
+    ctrl_idx: int,
+    horizon: float,
+    num_samples: int,
+    num_trials: int,
+    max_steps: int,
+    output_path: str,
+    gpu_id: int,
+    num_gpus: int,
+    warm_cache_dir: Optional[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    cmd = [
+        sys.executable,
+        "-m",
+        module_name,
+        _WORKER_FLAG,
+        "--ctrl-idx",
+        str(ctrl_idx),
+        "--horizon",
+        str(horizon),
+        "--num-samples",
+        str(num_samples),
+        "--num-trials",
+        str(num_trials),
+        "--max-steps",
+        str(max_steps),
+        "--output",
+        output_path,
+    ]
+    env = os.environ.copy()
+    _assign_worker_gpu(env, gpu_id, num_gpus)
+
+    worker_cache = tempfile.mkdtemp(prefix="go2_warp_worker_")
+    if warm_cache_dir is not None:
+        shutil.copytree(warm_cache_dir, worker_cache, dirs_exist_ok=True)
+    env["WARP_CACHE_PATH"] = worker_cache
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr[-2000:] if proc.stderr else "(no stderr)"
+            raise RuntimeError(
+                f"worker failed for controller {ctrl_idx}, horizon={horizon}, "
+                f"num_samples={num_samples}:\n{stderr_tail}"
+            )
+        return _load_point_result(output_path)
+    finally:
+        shutil.rmtree(worker_cache, ignore_errors=True)
+
+
+def _warmup_warp_cache(
+    *,
+    module_name: str,
+    specs: list[ControllerSpec],
+    horizon: float,
+    num_samples: int,
+) -> Optional[str]:
+    cache_dir = tempfile.mkdtemp(prefix="go2_warp_warm_")
+    env = os.environ.copy()
+    env["WARP_CACHE_PATH"] = cache_dir
+    print("Warming up Warp kernel cache...")
+
+    for ctrl_idx, spec in enumerate(specs):
+        output_path = os.path.join(cache_dir, f"warmup_{ctrl_idx}.npz")
+        cmd = [
+            sys.executable,
+            "-m",
+            module_name,
+            _WORKER_FLAG,
+            "--ctrl-idx",
+            str(ctrl_idx),
+            "--horizon",
+            str(horizon),
+            "--num-samples",
+            str(num_samples),
+            "--num-trials",
+            "1",
+            "--max-steps",
+            "5",
+            "--output",
+            output_path,
+        ]
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr[-2000:] if proc.stderr else "(no stderr)"
+            print(f"WARNING: Warp warmup failed for {spec.name}:\n{stderr_tail}")
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            return None
+        os.remove(output_path)
+
+    print("Warp kernel cache ready.")
+    return cache_dir
+
+
+def _run_as_worker() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(_WORKER_FLAG, action="store_true")
+    parser.add_argument("--ctrl-idx", type=int, required=True)
+    parser.add_argument("--horizon", type=float, required=True)
+    parser.add_argument("--num-samples", type=int, required=True)
+    parser.add_argument("--num-trials", type=int, required=True)
+    parser.add_argument("--max-steps", type=int, required=True)
+    parser.add_argument("--output", type=str, required=True)
+    args = parser.parse_args()
+
+    specs = build_controller_specs()
+    tracking_trials, frequency_trials = run_point(
+        specs[args.ctrl_idx],
+        horizon=args.horizon,
+        num_samples=args.num_samples,
+        num_trials=args.num_trials,
+        max_steps=args.max_steps,
+    )
+    _save_point_result(args.output, tracking_trials, frequency_trials)
+
+
+def _point_parameters(
+    axis_value: float,
+    *,
+    fixed_horizon: Optional[float],
+    fixed_num_samples: Optional[int],
+) -> tuple[float, int]:
+    horizon = float(axis_value) if fixed_horizon is None else float(fixed_horizon)
+    num_samples = (
+        int(axis_value) if fixed_num_samples is None else int(fixed_num_samples)
+    )
+    return horizon, num_samples
+
+
 def run_sweep(
     *,
     axis_name: str,
@@ -254,6 +483,9 @@ def run_sweep(
     num_trials: int,
     max_steps: int,
     specs: list[ControllerSpec],
+    parallel: Literal["sequential", "controllers", "axis", "all"],
+    max_workers: Union[int, Literal["auto"]],
+    num_gpus: int,
     fixed_horizon: Optional[float] = None,
     fixed_num_samples: Optional[int] = None,
 ) -> SweepResult:
@@ -261,36 +493,148 @@ def run_sweep(
     num_vals = len(axis_values)
     tracking_trials = np.zeros((num_ctrl, num_vals, num_trials), dtype=np.float32)
     frequency_trials = np.zeros_like(tracking_trials)
+    all_jobs = [
+        (ctrl_idx, value_idx, spec, float(axis_value))
+        for value_idx, axis_value in enumerate(axis_values)
+        for ctrl_idx, spec in enumerate(specs)
+    ]
 
-    total_jobs = num_ctrl * num_vals * num_trials
-    job_idx = 0
-    print(f"\n{axis_name} sweep: {num_vals} values x {num_ctrl} controllers x {num_trials} trials")
+    if parallel == "sequential":
+        print(
+            f"\nSequential {axis_name} sweep: {num_vals} values x "
+            f"{num_ctrl} controllers = {len(all_jobs)} jobs"
+        )
+        for ctrl_idx, value_idx, spec, axis_value in tqdm(
+            all_jobs,
+            desc=f"{axis_name} sweep",
+            unit="job",
+        ):
+            horizon, num_samples = _point_parameters(
+                axis_value,
+                fixed_horizon=fixed_horizon,
+                fixed_num_samples=fixed_num_samples,
+            )
+            tracking, frequency = run_point(
+                spec,
+                horizon=horizon,
+                num_samples=num_samples,
+                num_trials=num_trials,
+                max_steps=max_steps,
+            )
+            tracking_trials[ctrl_idx, value_idx] = tracking
+            frequency_trials[ctrl_idx, value_idx] = frequency
+    else:
+        if parallel == "controllers":
+            batches = [
+                [job for job in all_jobs if job[1] == value_idx]
+                for value_idx in range(num_vals)
+            ]
+        elif parallel == "axis":
+            batches = [
+                [job for job in all_jobs if job[0] == ctrl_idx]
+                for ctrl_idx in range(num_ctrl)
+            ]
+        else:
+            batches = [all_jobs]
 
-    for value_idx, axis_value in enumerate(axis_values):
-        print(f"\n=== {axis_label} {float(axis_value):.3g} ===")
-        for ctrl_idx, spec in enumerate(specs):
-            for trial_idx in range(num_trials):
-                job_idx += 1
-                horizon = float(axis_value) if fixed_horizon is None else float(fixed_horizon)
-                num_samples = (
-                    int(axis_value)
-                    if fixed_num_samples is None
-                    else int(fixed_num_samples)
-                )
-                print(
-                    f"  [{job_idx}/{total_jobs}] {spec.name}, "
-                    f"trial {trial_idx + 1}/{num_trials}"
-                )
-                tracking, hz = run_trial(
-                    spec,
-                    horizon=horizon,
-                    num_samples=num_samples,
-                    trial_idx=trial_idx,
-                    max_steps=max_steps,
-                )
-                tracking_trials[ctrl_idx, value_idx, trial_idx] = tracking
-                frequency_trials[ctrl_idx, value_idx, trial_idx] = hz
-                print(f"    tracking={tracking:.5g}, freq={hz:.1f} Hz")
+        module_name = _worker_module_name()
+        first_horizon, first_num_samples = _point_parameters(
+            float(axis_values[0]),
+            fixed_horizon=fixed_horizon,
+            fixed_num_samples=fixed_num_samples,
+        )
+        warm_cache_dir = _warmup_warp_cache(
+            module_name=module_name,
+            specs=specs,
+            horizon=first_horizon,
+            num_samples=first_num_samples,
+        )
+        gpu_info = f", {num_gpus} GPU(s)" if num_gpus > 1 else ""
+        print(
+            f"\nParallel {axis_name} sweep ({parallel}): {len(all_jobs)} jobs "
+            f"across {len(batches)} batch(es){gpu_info}"
+        )
+
+        progress = tqdm(total=len(all_jobs), desc=f"{axis_name} sweep", unit="job")
+        try:
+            for batch_idx, batch in enumerate(batches):
+                workers = _resolve_max_workers(max_workers, len(batch))
+                if len(batches) > 1:
+                    tqdm.write(
+                        f"\n--- Batch {batch_idx + 1}/{len(batches)} "
+                        f"({len(batch)} jobs, {workers} workers) ---"
+                    )
+                else:
+                    tqdm.write(f"Running {len(batch)} jobs with {workers} workers")
+
+                result_dir = tempfile.mkdtemp(prefix="go2_bench_")
+                failures: list[str] = []
+                try:
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        futures = {}
+                        for job_idx, (
+                            ctrl_idx,
+                            value_idx,
+                            spec,
+                            axis_value,
+                        ) in enumerate(batch):
+                            horizon, num_samples = _point_parameters(
+                                axis_value,
+                                fixed_horizon=fixed_horizon,
+                                fixed_num_samples=fixed_num_samples,
+                            )
+                            output_path = os.path.join(
+                                result_dir,
+                                f"result_{ctrl_idx}_{value_idx}.npz",
+                            )
+                            future = pool.submit(
+                                _launch_point_subprocess,
+                                module_name=module_name,
+                                ctrl_idx=ctrl_idx,
+                                horizon=horizon,
+                                num_samples=num_samples,
+                                num_trials=num_trials,
+                                max_steps=max_steps,
+                                output_path=output_path,
+                                gpu_id=job_idx % max(num_gpus, 1),
+                                num_gpus=num_gpus,
+                                warm_cache_dir=warm_cache_dir,
+                            )
+                            futures[future] = (
+                                ctrl_idx,
+                                value_idx,
+                                spec.name,
+                                axis_value,
+                            )
+
+                        for future in as_completed(futures):
+                            ctrl_idx, value_idx, name, axis_value = futures[future]
+                            progress.update(1)
+                            try:
+                                tracking, frequency = future.result()
+                            except Exception as exc:
+                                failures.append(
+                                    f"{name} @ {axis_name}={axis_value}: {exc}"
+                                )
+                                continue
+                            tracking_trials[ctrl_idx, value_idx] = tracking
+                            frequency_trials[ctrl_idx, value_idx] = frequency
+                            tqdm.write(
+                                f"  done: {name} @ {axis_name}={axis_value} "
+                                f"(tracking={tracking.mean():.5g})"
+                            )
+                finally:
+                    shutil.rmtree(result_dir, ignore_errors=True)
+
+                if failures:
+                    raise RuntimeError(
+                        "One or more benchmark workers failed:\n"
+                        + "\n".join(failures)
+                    )
+        finally:
+            progress.close()
+            if warm_cache_dir is not None:
+                shutil.rmtree(warm_cache_dir, ignore_errors=True)
 
     return SweepResult(
         axis_name=axis_name,
@@ -303,6 +647,51 @@ def run_sweep(
         tracking_error_trials=tracking_trials,
         frequency_trials=frequency_trials,
     )
+
+
+def calibrate_frequency(
+    result: SweepResult,
+    *,
+    specs: list[ControllerSpec],
+    num_trials: int,
+    calibration_steps: int,
+    fixed_horizon: Optional[float] = None,
+    fixed_num_samples: Optional[int] = None,
+) -> None:
+    total_jobs = len(specs) * len(result.axis_values)
+    print(f"\n{'-' * 60}")
+    print(
+        f"Frequency calibration: {num_trials} trials x {calibration_steps} steps, "
+        "sequential (exclusive GPU)"
+    )
+    print(f"{total_jobs} jobs total")
+    print(f"{'-' * 60}")
+
+    jobs = [
+        (ctrl_idx, value_idx, spec, float(axis_value))
+        for value_idx, axis_value in enumerate(result.axis_values)
+        for ctrl_idx, spec in enumerate(specs)
+    ]
+    for ctrl_idx, value_idx, spec, axis_value in tqdm(
+        jobs,
+        desc=f"{result.axis_name} frequency calibration",
+        unit="job",
+    ):
+        horizon, num_samples = _point_parameters(
+            axis_value,
+            fixed_horizon=fixed_horizon,
+            fixed_num_samples=fixed_num_samples,
+        )
+        _, frequencies = run_point(
+            spec,
+            horizon=horizon,
+            num_samples=num_samples,
+            num_trials=num_trials,
+            max_steps=calibration_steps,
+        )
+        result.frequency_trials[ctrl_idx, value_idx] = frequencies
+        result.frequency_mean[ctrl_idx, value_idx] = float(frequencies.mean())
+        result.frequency_std[ctrl_idx, value_idx] = float(frequencies.std())
 
 
 def _plot_matrix(
@@ -390,6 +779,10 @@ def save_outputs(
     *,
     max_steps: int,
     num_trials: int,
+    parallel: str,
+    max_workers: Union[int, Literal["auto"]],
+    num_gpus: int,
+    freq_calibration_iters: int,
 ) -> None:
     os.environ.setdefault("MPLCONFIGDIR", str(out_dir / ".matplotlib"))
     save_sweep(out_dir, specs, horizon_result)
@@ -405,12 +798,14 @@ def save_outputs(
         horizon_frequency_mean=horizon_result.frequency_mean,
         horizon_frequency_std=horizon_result.frequency_std,
         horizon_tracking_error_trials=horizon_result.tracking_error_trials,
+        horizon_frequency_trials=horizon_result.frequency_trials,
         num_samples_values=sample_result.axis_values,
         num_samples_tracking_error_mean=sample_result.tracking_error_mean,
         num_samples_tracking_error_std=sample_result.tracking_error_std,
         num_samples_frequency_mean=sample_result.frequency_mean,
         num_samples_frequency_std=sample_result.frequency_std,
         num_samples_tracking_error_trials=sample_result.tracking_error_trials,
+        num_samples_frequency_trials=sample_result.frequency_trials,
     )
 
     with open(out_dir / "summary.csv", "w", encoding="utf-8") as f:
@@ -435,6 +830,10 @@ def save_outputs(
         "controller_names": [spec.name for spec in specs],
         "num_trials": num_trials,
         "max_steps": max_steps,
+        "parallel": parallel,
+        "max_workers": max_workers,
+        "num_gpus": num_gpus,
+        "freq_calibration_iters": freq_calibration_iters,
         "planning_dt": PLANNING_DT,
         "frequency": FREQUENCY,
         "target_vx": TARGET_VX,
@@ -486,16 +885,50 @@ def save_outputs(
 
 
 def main() -> None:
+    if _WORKER_FLAG in sys.argv:
+        _run_as_worker()
+        return
+
     parser = argparse.ArgumentParser()
     add_output_root_arg(parser)
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
     parser.add_argument("--num-trials", type=int, default=NUM_TRIALS)
+    parser.add_argument(
+        "--parallel",
+        choices=("sequential", "controllers", "axis", "all"),
+        default=PARALLEL,
+    )
+    parser.add_argument("--max-workers", default=MAX_WORKERS)
+    parser.add_argument("--num-gpus", type=int, default=NUM_GPUS)
+    parser.add_argument(
+        "--freq-calibration-iters",
+        type=int,
+        default=FREQ_CALIBRATION_ITERS,
+    )
     args = parser.parse_args()
 
     horizons = np.asarray(HORIZONS, dtype=np.float32)
     num_samples_list = np.asarray(NUM_SAMPLES_LIST, dtype=np.int32)
     max_steps = int(args.max_steps)
     num_trials = int(args.num_trials)
+    num_gpus = int(args.num_gpus)
+    freq_calibration_iters = int(args.freq_calibration_iters)
+    max_workers: Union[int, Literal["auto"]]
+    if args.max_workers == "auto":
+        max_workers = "auto"
+    else:
+        max_workers = int(args.max_workers)
+
+    if max_steps <= 0:
+        parser.error("--max-steps must be positive")
+    if num_trials <= 0:
+        parser.error("--num-trials must be positive")
+    if num_gpus <= 0:
+        parser.error("--num-gpus must be positive")
+    if max_workers != "auto" and max_workers <= 0:
+        parser.error("--max-workers must be positive or 'auto'")
+    if freq_calibration_iters < 0:
+        parser.error("--freq-calibration-iters must be nonnegative")
 
     timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     out_dir = runs_dir("paper", output_root=args.output_root) / (
@@ -515,26 +948,69 @@ def main() -> None:
         f"Sample sweep: {len(num_samples_list)} values "
         f"@ horizon={HORIZON_FOR_SAMPLE_SWEEP:.3f}s"
     )
+    if args.parallel == "sequential":
+        print("Mode: sequential (in-process)")
+    else:
+        print(
+            f"Mode: parallel ({args.parallel}), workers={max_workers}, "
+            f"{num_gpus} GPU(s)"
+        )
+        if freq_calibration_iters > 0:
+            print(
+                f"Frequency calibration: {num_trials} trials x "
+                f"{freq_calibration_iters} steps (sequential)"
+            )
     print(f"{'=' * 60}")
 
-    horizon_result = run_sweep(
-        axis_name="horizon",
-        axis_label="Horizon (s)",
-        axis_values=horizons,
-        num_trials=num_trials,
-        max_steps=max_steps,
-        specs=specs,
-        fixed_num_samples=NUM_SAMPLES_FOR_HORIZON_SWEEP,
-    )
-    sample_result = run_sweep(
-        axis_name="num_samples",
-        axis_label="Number of Samples",
-        axis_values=num_samples_list,
-        num_trials=num_trials,
-        max_steps=max_steps,
-        specs=specs,
-        fixed_horizon=HORIZON_FOR_SAMPLE_SWEEP,
-    )
+    mps_started = False
+    if args.parallel != "sequential":
+        mps_started = _mps_start()
+
+    try:
+        horizon_result = run_sweep(
+            axis_name="horizon",
+            axis_label="Horizon (s)",
+            axis_values=horizons,
+            num_trials=num_trials,
+            max_steps=max_steps,
+            specs=specs,
+            parallel=args.parallel,
+            max_workers=max_workers,
+            num_gpus=num_gpus,
+            fixed_num_samples=NUM_SAMPLES_FOR_HORIZON_SWEEP,
+        )
+        sample_result = run_sweep(
+            axis_name="num_samples",
+            axis_label="Number of Samples",
+            axis_values=num_samples_list,
+            num_trials=num_trials,
+            max_steps=max_steps,
+            specs=specs,
+            parallel=args.parallel,
+            max_workers=max_workers,
+            num_gpus=num_gpus,
+            fixed_horizon=HORIZON_FOR_SAMPLE_SWEEP,
+        )
+    finally:
+        if mps_started:
+            _mps_stop()
+
+    if args.parallel != "sequential" and freq_calibration_iters > 0:
+        calibrate_frequency(
+            horizon_result,
+            specs=specs,
+            num_trials=num_trials,
+            calibration_steps=freq_calibration_iters,
+            fixed_num_samples=NUM_SAMPLES_FOR_HORIZON_SWEEP,
+        )
+        calibrate_frequency(
+            sample_result,
+            specs=specs,
+            num_trials=num_trials,
+            calibration_steps=freq_calibration_iters,
+            fixed_horizon=HORIZON_FOR_SAMPLE_SWEEP,
+        )
+
     save_outputs(
         out_dir,
         specs,
@@ -542,6 +1018,10 @@ def main() -> None:
         sample_result,
         max_steps=max_steps,
         num_trials=num_trials,
+        parallel=args.parallel,
+        max_workers=max_workers,
+        num_gpus=num_gpus,
+        freq_calibration_iters=freq_calibration_iters,
     )
 
     print(f"\nSaved Go2 tracking-error sweeps to {out_dir}")

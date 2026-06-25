@@ -198,6 +198,10 @@ class SeniorThesisBenchmarkSuite:
         self.task_factory = task_factory
         self.controller_specs = list(controller_specs)
         self.config = config
+        if module_name == "__main__":
+            main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+            if main_spec is not None and main_spec.name is not None:
+                module_name = main_spec.name
         self.module_name = module_name
         self._warm_cache_dir: Optional[str] = None
 
@@ -362,9 +366,7 @@ class SeniorThesisBenchmarkSuite:
         env = os.environ.copy()
         # Each worker gets its own copy of the pre-compiled Warp kernel cache.
         cache_key = os.path.splitext(os.path.basename(output_path))[0]
-        worker_cache = os.path.join(
-            tempfile.gettempdir(), f"warp_cache_{cache_key}",
-        )
+        worker_cache = tempfile.mkdtemp(prefix=f"warp_cache_{cache_key}_")
         if self._warm_cache_dir is not None:
             shutil.copytree(self._warm_cache_dir, worker_cache, dirs_exist_ok=True)
         env["WARP_CACHE_PATH"] = worker_cache
@@ -376,16 +378,25 @@ class SeniorThesisBenchmarkSuite:
                 env["CUDA_VISIBLE_DEVICES"] = dev_list[gpu_id % len(dev_list)]
             else:
                 env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        t0 = time.perf_counter()
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
-        elapsed = time.perf_counter() - t0
-        if proc.returncode != 0:
-            stderr_tail = proc.stderr[-2000:] if proc.stderr else "(no stderr)"
-            raise RuntimeError(
-                f"Worker [{spec_name} @ {axis_name}={axis_value}] "
-                f"failed after {elapsed:.1f}s:\n{stderr_tail}"
+        try:
+            t0 = time.perf_counter()
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
             )
-        return _load_benchmark_result(output_path)
+            elapsed = time.perf_counter() - t0
+            if proc.returncode != 0:
+                stderr_tail = proc.stderr[-2000:] if proc.stderr else "(no stderr)"
+                raise RuntimeError(
+                    f"Worker [{spec_name} @ {axis_name}={axis_value}] "
+                    f"failed after {elapsed:.1f}s:\n{stderr_tail}"
+                )
+            return _load_benchmark_result(output_path)
+        finally:
+            shutil.rmtree(worker_cache, ignore_errors=True)
 
     def _resolve_max_workers(self, num_jobs: int) -> int:
         """Return the effective worker count for the thread pool."""
