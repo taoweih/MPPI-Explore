@@ -32,13 +32,13 @@ def main():
     # -- Algorithm parameters: base MPPI ---------------------------------
     planning_dt = 0.02
     sample_horizon_steps = 24
-    control_node_count = 6
-    num_samples = 2048
+    control_node_count = 8
+    num_samples = 4096
     noise_level = 1.0
-    temperature = 0.05
+    temperature = 0.01
     iterations = 1
     plan_horizon = sample_horizon_steps * planning_dt
-    spline_type = "quadratic"
+    spline_type = "zero"
     num_knots = control_node_count + 1
     seed = 0
 
