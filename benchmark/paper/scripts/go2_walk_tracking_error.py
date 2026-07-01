@@ -33,7 +33,7 @@ import mujoco
 import numpy as np
 from tqdm import tqdm
 
-from algs import MPPI, DensityGuidedMPPI, KNNDensityModel
+from algs import MPPI, DIALMPC, DensityGuidedMPPI, KNNDensityModel
 from benchmark.common.cli import add_output_root_arg
 from benchmark.common.paths import runs_dir
 from benchmark.senior_thesis.scripts.benchmark_suite import _mps_start, _mps_stop
@@ -68,18 +68,30 @@ NUM_KNOTS = 8
 ITERATIONS = 1
 SEED = 0
 
+# DIAL-MPC parameters. The shared MPPI parameters above intentionally define
+# DIAL's sample count, horizon, noise scale, temperature, knots, and diffusion
+# updates; these match this benchmark's MPPI convention. The remaining knobs use
+# the DIAL-MPC paper-style defaults for Go2 trot.
+DIAL_NUM_INITIAL_DIFFUSION_STEPS = 10
+DIAL_HORIZON_DIFFUSE_FACTOR = 0.9
+DIAL_TRAJ_DIFFUSE_FACTOR = 0.5
+DIAL_INCLUDE_MEAN_SAMPLE = True
+DIAL_FIX_FIRST_KNOT = True
+DIAL_NORMALIZE_COSTS = True
+DIAL_COST_NORMALIZATION_EPS = 1.0e-6
+
 # Density-guided parameters.
 DENSITY_NUM_KNOTS_PER_STAGE = 2
 KNN_K = 10
 INVERSE_DENSITY_POWER = 1.0
 RESAMPLE_COST_WEIGHT = 1.0
-RESAMPLE_COST_TEMPERATURE = None  # None uses the controller temperature.
+RESAMPLE_COST_TEMPERATURE = None  # None uses unit temperature for normalized cost scores.
 
-OUTPUT_NAME = "go2_walk_tracking_error"
+OUTPUT_NAME = "go2_walk_tracking_error_mppi_density_dial"
 
 # Parallelism: "sequential", "controllers", "axis", or "all".
 PARALLEL = "all"
-MAX_WORKERS = "20"  # int or "auto" (= total jobs in batch)
+MAX_WORKERS = "30"  # int or "auto" (= total jobs in batch)
 NUM_GPUS = 2
 FREQ_CALIBRATION_ITERS = 50
 
@@ -183,6 +195,19 @@ def build_controller_specs() -> list[ControllerSpec]:
                 num_knots_per_stage=DENSITY_NUM_KNOTS_PER_STAGE,
                 resample_cost_weight=RESAMPLE_COST_WEIGHT,
                 resample_cost_temperature=RESAMPLE_COST_TEMPERATURE,
+            ),
+        ),
+        ControllerSpec(
+            "DIAL-MPC",
+            lambda task, horizon, num_samples, seed: DIALMPC(
+                **_base_mppi_kwargs(task, horizon, num_samples, seed),
+                num_initial_diffusion_steps=DIAL_NUM_INITIAL_DIFFUSION_STEPS,
+                horizon_diffuse_factor=DIAL_HORIZON_DIFFUSE_FACTOR,
+                traj_diffuse_factor=DIAL_TRAJ_DIFFUSE_FACTOR,
+                include_mean_sample=DIAL_INCLUDE_MEAN_SAMPLE,
+                fix_first_knot=DIAL_FIX_FIRST_KNOT,
+                normalize_costs=DIAL_NORMALIZE_COSTS,
+                cost_normalization_eps=DIAL_COST_NORMALIZATION_EPS,
             ),
         ),
     ]
@@ -858,6 +883,24 @@ def save_outputs(
                 "inverse_density_power": INVERSE_DENSITY_POWER,
                 "resample_cost_weight": RESAMPLE_COST_WEIGHT,
                 "resample_cost_temperature": RESAMPLE_COST_TEMPERATURE,
+                "resample_score_normalization": "zscore(-log_density) + zscore(-cost)",
+                "resample_cost_temperature_default": 1.0,
+            },
+            "dial_mpc": {
+                "num_samples": "same as shared/sweep value",
+                "noise_level": "same as shared",
+                "temperature": "same as shared",
+                "plan_horizon": "same as sweep value",
+                "spline_type": "zero",
+                "num_knots": "same as shared",
+                "iterations": "same as shared",
+                "num_initial_diffusion_steps": DIAL_NUM_INITIAL_DIFFUSION_STEPS,
+                "horizon_diffuse_factor": DIAL_HORIZON_DIFFUSE_FACTOR,
+                "traj_diffuse_factor": DIAL_TRAJ_DIFFUSE_FACTOR,
+                "include_mean_sample": DIAL_INCLUDE_MEAN_SAMPLE,
+                "fix_first_knot": DIAL_FIX_FIRST_KNOT,
+                "normalize_costs": DIAL_NORMALIZE_COSTS,
+                "cost_normalization_eps": DIAL_COST_NORMALIZATION_EPS,
             },
         },
         "metric": {

@@ -18,6 +18,7 @@ import numpy as np
 
 from algs import (
     MPPI,
+    DIALMPC,
     DensityGuidedMPPI,
     KDEDensityModel,
     KNNDensityModel,
@@ -34,11 +35,11 @@ from tasks import UR5e
 
 
 # Horizon sweep
-HORIZONS = np.linspace(0.1, 2.0, 20)
+HORIZONS = np.linspace(0.1, 2.0, 10)
 NUM_SAMPLES_FOR_HORIZON_SWEEP = 512
 
 # Sample-count sweep
-NUM_SAMPLES_LIST = np.linspace(32, 1024, 20, dtype=int).tolist()
+NUM_SAMPLES_LIST = np.linspace(32, 1024, 10, dtype=int).tolist()
 HORIZON_FOR_SAMPLE_SWEEP = 0.5
 
 # Trial settings
@@ -49,12 +50,12 @@ FREQUENCY = 50.0
 
 # Output
 RECORD_VIDEO = False
-OUTPUT_NAME = "ur5e_mppi_vs_density_kde_vs_knn_vs_knn_task_state"
+OUTPUT_NAME = "ur5e_mppi_vs_density_kde_vs_knn_vs_knn_task_state_vs_dial"
 
 # Parallelism: "sequential", "controllers", "axis", or "all"
 PARALLEL = "all"
-MAX_WORKERS = "20"  # int or "auto" (= total jobs in batch)
-NUM_GPUS = 1
+MAX_WORKERS = "50"  # int or "auto" (= total jobs in batch)
+NUM_GPUS = 2
 FREQ_CALIBRATION_ITERS = 50
 
 # Shared MPPI parameters
@@ -64,11 +65,22 @@ NUM_KNOTS = 8
 ITERATIONS = 1
 SEED = 5
 
+# DIAL-MPC parameters. The shared MPPI parameters above intentionally define
+# DIAL's sample count, horizon, noise scale, temperature, knots, and diffusion
+# updates; these are the DIAL-only defaults from the paper-style controller.
+DIAL_NUM_INITIAL_DIFFUSION_STEPS = 10
+DIAL_HORIZON_DIFFUSE_FACTOR = 0.9
+DIAL_TRAJ_DIFFUSE_FACTOR = 0.5
+DIAL_INCLUDE_MEAN_SAMPLE = True
+DIAL_FIX_FIRST_KNOT = True
+DIAL_NORMALIZE_COSTS = True
+DIAL_COST_NORMALIZATION_EPS = 1.0e-6
+
 # Density-guided parameters
 NUM_KNOTS_PER_STAGE = 2
 INVERSE_DENSITY_POWER = 1.0
 RESAMPLE_COST_WEIGHT = 1.0
-RESAMPLE_COST_TEMPERATURE = None  # None uses the controller temperature.
+RESAMPLE_COST_TEMPERATURE = None  # None uses unit temperature for normalized cost scores.
 
 # KDE density model
 KDE_BANDWIDTH = 0.30
@@ -114,6 +126,23 @@ def _mppi_factory(
     num_samples: Optional[int] = None,
 ) -> MPPI:
     return MPPI(**_base_mppi_kwargs(task, horizon, num_samples))
+
+
+def _dial_factory(
+    task: UR5e,
+    horizon: float,
+    num_samples: Optional[int] = None,
+) -> DIALMPC:
+    return DIALMPC(
+        **_base_mppi_kwargs(task, horizon, num_samples),
+        num_initial_diffusion_steps=DIAL_NUM_INITIAL_DIFFUSION_STEPS,
+        horizon_diffuse_factor=DIAL_HORIZON_DIFFUSE_FACTOR,
+        traj_diffuse_factor=DIAL_TRAJ_DIFFUSE_FACTOR,
+        include_mean_sample=DIAL_INCLUDE_MEAN_SAMPLE,
+        fix_first_knot=DIAL_FIX_FIRST_KNOT,
+        normalize_costs=DIAL_NORMALIZE_COSTS,
+        cost_normalization_eps=DIAL_COST_NORMALIZATION_EPS,
+    )
 
 
 def _density_kde_factory(
@@ -190,6 +219,7 @@ def build_controller_specs() -> list[ControllerSpec]:
             name="Density-Guided MPPI (KNN qpos+qvel+state)",
             factory=_density_knn_task_state_factory,
         ),
+        ControllerSpec(name="DIAL-MPC", factory=_dial_factory),
     ]
 
 
@@ -287,6 +317,8 @@ def main() -> None:
                 "inverse_density_power": INVERSE_DENSITY_POWER,
                 "resample_cost_weight": RESAMPLE_COST_WEIGHT,
                 "resample_cost_temperature": RESAMPLE_COST_TEMPERATURE,
+                "resample_score_normalization": "zscore(-log_density) + zscore(-cost)",
+                "resample_cost_temperature_default": 1.0,
             },
             "kde_density": {
                 "kde_bandwidth": KDE_BANDWIDTH,
@@ -308,6 +340,22 @@ def main() -> None:
                 "angle_weight": KNN_ANGLE_WEIGHT,
                 "linear_velocity_weight": KNN_LINEAR_VELOCITY_WEIGHT,
                 "angular_velocity_weight": KNN_ANGULAR_VELOCITY_WEIGHT,
+            },
+            "dial_mpc": {
+                "num_samples": "same as shared/sweep value",
+                "noise_level": "same as shared",
+                "temperature": "same as shared",
+                "plan_horizon": "same as sweep value",
+                "spline_type": "zero",
+                "num_knots": "same as shared",
+                "iterations": "same as shared",
+                "num_initial_diffusion_steps": DIAL_NUM_INITIAL_DIFFUSION_STEPS,
+                "horizon_diffuse_factor": DIAL_HORIZON_DIFFUSE_FACTOR,
+                "traj_diffuse_factor": DIAL_TRAJ_DIFFUSE_FACTOR,
+                "include_mean_sample": DIAL_INCLUDE_MEAN_SAMPLE,
+                "fix_first_knot": DIAL_FIX_FIRST_KNOT,
+                "normalize_costs": DIAL_NORMALIZE_COSTS,
+                "cost_normalization_eps": DIAL_COST_NORMALIZATION_EPS,
             },
         },
     )

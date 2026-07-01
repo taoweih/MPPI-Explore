@@ -11,7 +11,7 @@ Algorithm (one optimize step):
                (b) extract density state s_i                 via task/model extractor
                (c) density_model.launch_compute(s)          ρ(s_i)
                (d) density_model.launch_resample_with_cost(idx, n)
-                       idx ∝ resample((1/ρ^α) · exp(-η(J_stage - J_min)/λ_stage))
+                       idx ∝ softmax(α z(-log ρ) + η z(-J_stage) / τ)
                (e) reshuffle (controls, knots, qpos, qvel, time) by idx
                (f) regenerate trailing knots
                        K[k_start:, :] ← clip(μ + σ · 𝒩)
@@ -160,9 +160,7 @@ class DensityGuidedMPPI(BaseMPPI):
                 f"got {self.resample_cost_weight}"
             )
         self.resample_cost_temperature = (
-            float(self.temperature)
-            if resample_cost_temperature is None
-            else float(resample_cost_temperature)
+            1.0 if resample_cost_temperature is None else float(resample_cost_temperature)
         )
         if self.resample_cost_weight > 0.0 and self.resample_cost_temperature <= 0.0:
             raise ValueError(

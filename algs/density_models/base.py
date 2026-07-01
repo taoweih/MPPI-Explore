@@ -43,11 +43,12 @@ class DensityModel(ABC):
         cost_temperature: float,
         cost_weight: float,
     ) -> None:
-        """Systematic resample using inverse density and low rollout cost.
+        """Systematic resample using normalized density and cost scores.
 
-        Implementations should use weights proportional to their existing
-        inverse-density weight multiplied by a low-cost preference, typically
-        ``exp(-cost_weight * (J_i - min_j J_j) / cost_temperature)``.
+        Implementations should make inverse density and low rollout cost
+        comparable before combining them, typically with weights proportional to
+        ``softmax(alpha * z(-log(rho_i)) + cost_weight * z(-J_i) /
+        cost_temperature)``.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support cost-aware resampling."

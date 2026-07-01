@@ -20,8 +20,8 @@ class KDEDensityModel(DensityModel):
     `bandwidth` may be a scalar (broadcast to all state dimensions) or an
     array of length state_dim.  `alpha` controls how strongly samples in
     low-density regions are favoured (α=1 full inverse-density, α=0 uniform).
-    DensityGuidedMPPI can additionally multiply the resampling weights by a
-    low-cost softmax factor at each stage boundary.
+    DensityGuidedMPPI can additionally combine normalized low-density and
+    low-cost scores at each stage boundary.
     """
 
     def __init__(
@@ -131,7 +131,7 @@ class KDEDensityModel(DensityModel):
         cost_temperature: float,
         cost_weight: float,
     ) -> None:
-        """Systematic resample with weights ∝ inverse-density × low-cost."""
+        """Systematic resample with softmax over normalized density/cost scores."""
         kernel = getattr(type(self), "_resample_from_density_and_cost_kernel", None)
         if kernel is None:
             @wp.kernel
@@ -150,19 +150,53 @@ class KDEDensityModel(DensityModel):
                 if tid > 0:
                     return
 
-                min_cost = costs[0]
-                for j_min in range(1, N):
-                    if costs[j_min] < min_cost:
-                        min_cost = costs[j_min]
-
                 eps = float(1.0e-6)
+                score_eps = float(1.0e-6)
+
+                density_mean = float(0.0)
+                cost_mean = float(0.0)
+                for j in range(N):
+                    density_score = -wp.log(density[j] + eps)
+                    cost_score = -costs[j]
+                    density_mean = density_mean + density_score
+                    cost_mean = cost_mean + cost_score
+                inv_N = 1.0 / float(N)
+                density_mean = density_mean * inv_N
+                cost_mean = cost_mean * inv_N
+
+                density_var = float(0.0)
+                cost_var = float(0.0)
+                for j in range(N):
+                    density_delta = -wp.log(density[j] + eps) - density_mean
+                    cost_delta = -costs[j] - cost_mean
+                    density_var = density_var + density_delta * density_delta
+                    cost_var = cost_var + cost_delta * cost_delta
+
+                density_std = wp.sqrt(density_var * inv_N)
+                cost_std = wp.sqrt(cost_var * inv_N)
+                if density_std < score_eps:
+                    density_std = score_eps
+                if cost_std < score_eps:
+                    cost_std = score_eps
+
+                max_log_w = (
+                    alpha * ((-wp.log(density[0] + eps) - density_mean) / density_std)
+                    + (cost_weight / cost_temperature)
+                    * ((-costs[0] - cost_mean) / cost_std)
+                )
+                for j_max in range(1, N):
+                    density_z = (-wp.log(density[j_max] + eps) - density_mean) / density_std
+                    cost_z = (-costs[j_max] - cost_mean) / cost_std
+                    log_w = alpha * density_z + (cost_weight / cost_temperature) * cost_z
+                    if log_w > max_log_w:
+                        max_log_w = log_w
+
                 total = float(0.0)
                 for j in range(N):
-                    density_w = wp.pow(1.0 / (density[j] + eps), alpha)
-                    cost_w = wp.exp(
-                        -cost_weight * (costs[j] - min_cost) / cost_temperature
-                    )
-                    total = total + density_w * cost_w
+                    density_z = (-wp.log(density[j] + eps) - density_mean) / density_std
+                    cost_z = (-costs[j] - cost_mean) / cost_std
+                    log_w = alpha * density_z + (cost_weight / cost_temperature) * cost_z
+                    total = total + wp.exp(log_w - max_log_w)
 
                 # Systematic resampling: one random phase, then N evenly spaced thresholds.
                 u = offsets[stage_idx]
@@ -177,11 +211,15 @@ class KDEDensityModel(DensityModel):
                         if j >= N - 1:
                             can_advance = 0
                         else:
-                            density_w = wp.pow(1.0 / (density[j] + eps), alpha)
-                            cost_w = wp.exp(
-                                -cost_weight * (costs[j] - min_cost) / cost_temperature
+                            density_z = (
+                                -wp.log(density[j] + eps) - density_mean
+                            ) / density_std
+                            cost_z = (-costs[j] - cost_mean) / cost_std
+                            log_w = (
+                                alpha * density_z
+                                + (cost_weight / cost_temperature) * cost_z
                             )
-                            w_j = density_w * cost_w / total
+                            w_j = wp.exp(log_w - max_log_w) / total
                             if cumulative + w_j < threshold:
                                 cumulative = cumulative + w_j
                                 j = j + 1
