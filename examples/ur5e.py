@@ -18,7 +18,7 @@ from algs import (
     KDEDensityModel,
     KNNDensityModel,
 )
-from simulation.deterministic import run_interactive
+from simulation import run_interactive, run_interactive_async
 from tasks.ur5e import UR5e
 from utils.visualize_learned_value import (
     visualize_learned_value_3d_scatter,
@@ -41,6 +41,13 @@ def main():
         nargs="?",
         default="mppi",
         choices=("mppi", "density", "learned_value", "density_learned_value"),
+    )
+    parser.add_argument(
+        "--simulation",
+        "--sim",
+        default="deterministic",
+        choices=("deterministic", "async"),
+        help="CPU simulation loop to use.",
     )
     args = parser.parse_args()
 
@@ -305,7 +312,10 @@ def main():
         vis_fn = _vis_fn
 
     # ── Run ─────────────────────────────────────────────────────────────
-    run_interactive(
+    simulation_runner = (
+        run_interactive_async if args.simulation == "async" else run_interactive
+    )
+    simulation_runner(
         controller=controller,
         mj_model=mj_model,
         mj_data=mj_data,

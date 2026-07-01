@@ -15,7 +15,7 @@ from algs import (
     KDEDensityModel,
     KNNDensityModel,
 )
-from simulation.deterministic import run_interactive
+from simulation import run_interactive, run_interactive_async
 from tasks.go2_crate_climb import Go2CrateClimb
 
 
@@ -26,6 +26,13 @@ def main():
         nargs="?",
         default="mppi",
         choices=("mppi", "density", "dial"),
+    )
+    parser.add_argument(
+        "--simulation",
+        "--sim",
+        default="deterministic",
+        choices=("deterministic", "async"),
+        help="CPU simulation loop to use.",
     )
     args = parser.parse_args()
 
@@ -168,7 +175,10 @@ def main():
         controller = MPPI(**base_mppi_kwargs)
 
     # Run
-    run_interactive(
+    simulation_runner = (
+        run_interactive_async if args.simulation == "async" else run_interactive
+    )
+    simulation_runner(
         controller=controller,
         mj_model=mj_model,
         mj_data=mj_data,
