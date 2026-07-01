@@ -281,6 +281,14 @@ class PaperBenchmarkSuite(SeniorThesisBenchmarkSuite):
 def main() -> None:
     parser = argparse.ArgumentParser()
     add_sweep_config_args(parser)
+    parser.add_argument(
+        "--simulation",
+        "--sim",
+        dest="simulation_mode",
+        default="deterministic",
+        choices=("deterministic", "async"),
+        help="CPU simulation loop to use.",
+    )
     args, _ = parser.parse_known_args()
 
     config = SweepConfig(
@@ -297,6 +305,7 @@ def main() -> None:
         parallel=PARALLEL,
         max_workers=MAX_WORKERS,
         num_gpus=NUM_GPUS,
+        simulation_mode=args.simulation_mode,
         freq_calibration_iters=FREQ_CALIBRATION_ITERS,
         controller_params={
             "shared": {

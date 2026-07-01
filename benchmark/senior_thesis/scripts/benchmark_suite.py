@@ -23,6 +23,7 @@ import mujoco
 import numpy as np
 
 from simulation.deterministic import run_benchmark, BenchmarkResult
+from simulation.asyncrousnous import run_benchmark_async
 from benchmark.common.paths import runs_dir
 
 _WORKER_FLAG = "--_benchmark_worker"
@@ -108,6 +109,7 @@ class SweepConfig:
     parallel: Literal["sequential", "controllers", "axis", "all"] = "sequential"
     max_workers: Union[int, Literal["auto"]] = "auto"
     num_gpus: int = 1
+    simulation_mode: Literal["deterministic", "async"] = "deterministic"
     # After parallel runs, do a short sequential pass with exclusive GPU
     # access to get clean frequency numbers. Each controller runs num_trials
     # trials of this many iterations. Set to 0 to skip.
@@ -228,6 +230,7 @@ class SeniorThesisBenchmarkSuite:
         print(f"Controllers: {ctrl_names}")
         print(f"Trials per point: {self.config.num_trials}")
         print(f"Max iterations: {self.config.max_iterations}")
+        print(f"Simulation: {self.config.simulation_mode}")
         print(f"Horizon sweep: {num_horizon} values")
         if has_samples:
             print(f"Samples sweep: {num_samples} values "
@@ -363,6 +366,8 @@ class SeniorThesisBenchmarkSuite:
         ]
         if self.config.output_root is not None:
             cmd.extend(["--output-root", self.config.output_root])
+        if getattr(self.config, "simulation_mode", "deterministic") != "deterministic":
+            cmd.extend(["--simulation", self.config.simulation_mode])
         env = os.environ.copy()
         # Each worker gets its own copy of the pre-compiled Warp kernel cache.
         cache_key = os.path.splitext(os.path.basename(output_path))[0]
@@ -447,6 +452,8 @@ class SeniorThesisBenchmarkSuite:
         ]
         if self.config.output_root is not None:
             cmd.extend(["--output-root", self.config.output_root])
+        if getattr(self.config, "simulation_mode", "deterministic") != "deterministic":
+            cmd.extend(["--simulation", self.config.simulation_mode])
         proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
         if proc.returncode != 0:
             stderr_tail = proc.stderr[-2000:] if proc.stderr else "(no stderr)"
@@ -473,7 +480,8 @@ class SeniorThesisBenchmarkSuite:
         mj_data = mujoco.MjData(mj_model)
         mujoco.mj_forward(mj_model, mj_data)
 
-        return run_benchmark(
+        benchmark_runner = self._benchmark_runner()
+        return benchmark_runner(
             controller=controller,
             mj_model=mj_model,
             mj_data=mj_data,
@@ -483,6 +491,17 @@ class SeniorThesisBenchmarkSuite:
             max_iterations=self.config.max_iterations,
             record_video=self.config.record_video,
             video_trial_index=self.config.video_trial_index,
+        )
+
+    def _benchmark_runner(self):
+        simulation_mode = getattr(self.config, "simulation_mode", "deterministic")
+        if simulation_mode == "deterministic":
+            return run_benchmark
+        if simulation_mode == "async":
+            return run_benchmark_async
+        raise ValueError(
+            f"Unknown simulation_mode={simulation_mode!r}; "
+            "expected 'deterministic' or 'async'."
         )
 
     def _run_freq_calibration(
@@ -517,7 +536,8 @@ class SeniorThesisBenchmarkSuite:
                 mj_data = mujoco.MjData(mj_model)
                 mujoco.mj_forward(mj_model, mj_data)
 
-                result = run_benchmark(
+                benchmark_runner = self._benchmark_runner()
+                result = benchmark_runner(
                     controller=controller,
                     mj_model=mj_model,
                     mj_data=mj_data,

@@ -37,6 +37,7 @@ from algs import MPPI, DIALMPC, DensityGuidedMPPI, KNNDensityModel
 from benchmark.common.cli import add_output_root_arg
 from benchmark.common.paths import runs_dir
 from benchmark.senior_thesis.scripts.benchmark_suite import _mps_start, _mps_stop
+from simulation.asyncrousnous import _AsyncPlanner, _step_current_async_plan
 from tasks.go2_walk import Go2Walk
 
 
@@ -246,6 +247,7 @@ def run_trial(
     num_samples: int,
     trial_idx: int,
     max_steps: int,
+    simulation_mode: Literal["deterministic", "async"] = "deterministic",
 ) -> tuple[float, float]:
     """Return mean raw tracking error and control Hz."""
     task = make_task()
@@ -263,6 +265,54 @@ def run_trial(
     if getattr(controller, "reset_after_warmup", False) and hasattr(controller, "reset"):
         controller.reset(seed=seed)
     task.reset_to_home(mj_data)
+
+    if simulation_mode == "async":
+        if hasattr(controller, "warm_start"):
+            controller.warm_start(float(mj_data.time))
+
+        planner = _AsyncPlanner(controller, mj_model)
+        planner.reset_active_plan()
+        tracking_errors = np.zeros(max_steps, dtype=np.float32)
+
+        replan_period = 1.0 / FREQUENCY
+        sim_steps_per_replan = max(int(replan_period / mj_model.opt.timestep), 1)
+        step_dt = float(sim_steps_per_replan * mj_model.opt.timestep)
+        trial_start = time.perf_counter()
+        trial_elapsed = 0.0
+        try:
+            for step_idx in range(max_steps):
+                loop_start = time.perf_counter()
+
+                planner.poll()
+                planner.submit_snapshot(mj_data)
+                _step_current_async_plan(
+                    planner,
+                    mj_model,
+                    mj_data,
+                    sim_steps_per_replan,
+                )
+                planner.poll()
+
+                tracking_errors[step_idx] = dial_tracking_error(task, mj_data)
+
+                elapsed = time.perf_counter() - loop_start
+                if elapsed < step_dt:
+                    time.sleep(step_dt - elapsed)
+            trial_elapsed = time.perf_counter() - trial_start
+        finally:
+            if trial_elapsed == 0.0:
+                trial_elapsed = time.perf_counter() - trial_start
+            planner.drain(commit=False)
+            planner.close()
+
+        control_hz = planner.stats.completed / max(trial_elapsed, 1e-9)
+        return float(tracking_errors.mean()), float(control_hz)
+
+    if simulation_mode != "deterministic":
+        raise ValueError(
+            f"Unknown simulation_mode={simulation_mode!r}; "
+            "expected 'deterministic' or 'async'."
+        )
 
     act_before_plan = bool(getattr(controller, "act_before_plan", False))
     tracking_errors = np.zeros(max_steps, dtype=np.float32)
@@ -293,6 +343,7 @@ def run_point(
     num_samples: int,
     num_trials: int,
     max_steps: int,
+    simulation_mode: Literal["deterministic", "async"] = "deterministic",
 ) -> tuple[np.ndarray, np.ndarray]:
     tracking_trials = np.zeros(num_trials, dtype=np.float32)
     frequency_trials = np.zeros(num_trials, dtype=np.float32)
@@ -303,6 +354,7 @@ def run_point(
             num_samples=num_samples,
             trial_idx=trial_idx,
             max_steps=max_steps,
+            simulation_mode=simulation_mode,
         )
         tracking_trials[trial_idx] = tracking
         frequency_trials[trial_idx] = hz
@@ -365,6 +417,7 @@ def _launch_point_subprocess(
     num_samples: int,
     num_trials: int,
     max_steps: int,
+    simulation_mode: Literal["deterministic", "async"],
     output_path: str,
     gpu_id: int,
     num_gpus: int,
@@ -385,6 +438,8 @@ def _launch_point_subprocess(
         str(num_trials),
         "--max-steps",
         str(max_steps),
+        "--simulation",
+        simulation_mode,
         "--output",
         output_path,
     ]
@@ -421,6 +476,7 @@ def _warmup_warp_cache(
     specs: list[ControllerSpec],
     horizon: float,
     num_samples: int,
+    simulation_mode: Literal["deterministic", "async"],
 ) -> Optional[str]:
     cache_dir = tempfile.mkdtemp(prefix="go2_warp_warm_")
     env = os.environ.copy()
@@ -444,6 +500,8 @@ def _warmup_warp_cache(
             "1",
             "--max-steps",
             "5",
+            "--simulation",
+            simulation_mode,
             "--output",
             output_path,
         ]
@@ -473,6 +531,13 @@ def _run_as_worker() -> None:
     parser.add_argument("--num-samples", type=int, required=True)
     parser.add_argument("--num-trials", type=int, required=True)
     parser.add_argument("--max-steps", type=int, required=True)
+    parser.add_argument(
+        "--simulation",
+        "--sim",
+        dest="simulation_mode",
+        default="deterministic",
+        choices=("deterministic", "async"),
+    )
     parser.add_argument("--output", type=str, required=True)
     args = parser.parse_args()
 
@@ -483,6 +548,7 @@ def _run_as_worker() -> None:
         num_samples=args.num_samples,
         num_trials=args.num_trials,
         max_steps=args.max_steps,
+        simulation_mode=args.simulation_mode,
     )
     _save_point_result(args.output, tracking_trials, frequency_trials)
 
@@ -511,6 +577,7 @@ def run_sweep(
     parallel: Literal["sequential", "controllers", "axis", "all"],
     max_workers: Union[int, Literal["auto"]],
     num_gpus: int,
+    simulation_mode: Literal["deterministic", "async"],
     fixed_horizon: Optional[float] = None,
     fixed_num_samples: Optional[int] = None,
 ) -> SweepResult:
@@ -545,6 +612,7 @@ def run_sweep(
                 num_samples=num_samples,
                 num_trials=num_trials,
                 max_steps=max_steps,
+                simulation_mode=simulation_mode,
             )
             tracking_trials[ctrl_idx, value_idx] = tracking
             frequency_trials[ctrl_idx, value_idx] = frequency
@@ -573,6 +641,7 @@ def run_sweep(
             specs=specs,
             horizon=first_horizon,
             num_samples=first_num_samples,
+            simulation_mode=simulation_mode,
         )
         gpu_info = f", {num_gpus} GPU(s)" if num_gpus > 1 else ""
         print(
@@ -620,6 +689,7 @@ def run_sweep(
                                 num_samples=num_samples,
                                 num_trials=num_trials,
                                 max_steps=max_steps,
+                                simulation_mode=simulation_mode,
                                 output_path=output_path,
                                 gpu_id=job_idx % max(num_gpus, 1),
                                 num_gpus=num_gpus,
@@ -680,6 +750,7 @@ def calibrate_frequency(
     specs: list[ControllerSpec],
     num_trials: int,
     calibration_steps: int,
+    simulation_mode: Literal["deterministic", "async"],
     fixed_horizon: Optional[float] = None,
     fixed_num_samples: Optional[int] = None,
 ) -> None:
@@ -713,6 +784,7 @@ def calibrate_frequency(
             num_samples=num_samples,
             num_trials=num_trials,
             max_steps=calibration_steps,
+            simulation_mode=simulation_mode,
         )
         result.frequency_trials[ctrl_idx, value_idx] = frequencies
         result.frequency_mean[ctrl_idx, value_idx] = float(frequencies.mean())
@@ -807,6 +879,7 @@ def save_outputs(
     parallel: str,
     max_workers: Union[int, Literal["auto"]],
     num_gpus: int,
+    simulation_mode: Literal["deterministic", "async"],
     freq_calibration_iters: int,
 ) -> None:
     os.environ.setdefault("MPLCONFIGDIR", str(out_dir / ".matplotlib"))
@@ -858,6 +931,7 @@ def save_outputs(
         "parallel": parallel,
         "max_workers": max_workers,
         "num_gpus": num_gpus,
+        "simulation_mode": simulation_mode,
         "freq_calibration_iters": freq_calibration_iters,
         "planning_dt": PLANNING_DT,
         "frequency": FREQUENCY,
@@ -944,6 +1018,14 @@ def main() -> None:
     parser.add_argument("--max-workers", default=MAX_WORKERS)
     parser.add_argument("--num-gpus", type=int, default=NUM_GPUS)
     parser.add_argument(
+        "--simulation",
+        "--sim",
+        dest="simulation_mode",
+        default="deterministic",
+        choices=("deterministic", "async"),
+        help="CPU simulation loop to use.",
+    )
+    parser.add_argument(
         "--freq-calibration-iters",
         type=int,
         default=FREQ_CALIBRATION_ITERS,
@@ -955,6 +1037,7 @@ def main() -> None:
     max_steps = int(args.max_steps)
     num_trials = int(args.num_trials)
     num_gpus = int(args.num_gpus)
+    simulation_mode = args.simulation_mode
     freq_calibration_iters = int(args.freq_calibration_iters)
     max_workers: Union[int, Literal["auto"]]
     if args.max_workers == "auto":
@@ -986,6 +1069,7 @@ def main() -> None:
     print(f"Controllers: {', '.join(spec.name for spec in specs)}")
     print(f"Trials per point: {num_trials}")
     print(f"Task steps per trial: {max_steps}")
+    print(f"Simulation: {simulation_mode}")
     print(f"Horizon sweep: {len(horizons)} values @ {NUM_SAMPLES_FOR_HORIZON_SWEEP} samples")
     print(
         f"Sample sweep: {len(num_samples_list)} values "
@@ -1020,6 +1104,7 @@ def main() -> None:
             parallel=args.parallel,
             max_workers=max_workers,
             num_gpus=num_gpus,
+            simulation_mode=simulation_mode,
             fixed_num_samples=NUM_SAMPLES_FOR_HORIZON_SWEEP,
         )
         sample_result = run_sweep(
@@ -1032,6 +1117,7 @@ def main() -> None:
             parallel=args.parallel,
             max_workers=max_workers,
             num_gpus=num_gpus,
+            simulation_mode=simulation_mode,
             fixed_horizon=HORIZON_FOR_SAMPLE_SWEEP,
         )
     finally:
@@ -1044,6 +1130,7 @@ def main() -> None:
             specs=specs,
             num_trials=num_trials,
             calibration_steps=freq_calibration_iters,
+            simulation_mode=simulation_mode,
             fixed_num_samples=NUM_SAMPLES_FOR_HORIZON_SWEEP,
         )
         calibrate_frequency(
@@ -1051,6 +1138,7 @@ def main() -> None:
             specs=specs,
             num_trials=num_trials,
             calibration_steps=freq_calibration_iters,
+            simulation_mode=simulation_mode,
             fixed_horizon=HORIZON_FOR_SAMPLE_SWEEP,
         )
 
@@ -1064,6 +1152,7 @@ def main() -> None:
         parallel=args.parallel,
         max_workers=max_workers,
         num_gpus=num_gpus,
+        simulation_mode=simulation_mode,
         freq_calibration_iters=freq_calibration_iters,
     )
 
