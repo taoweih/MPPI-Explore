@@ -37,7 +37,7 @@ from algs import MPPI, DIALMPC, DensityGuidedMPPI, KNNDensityModel
 from benchmark.common.cli import add_output_root_arg
 from benchmark.common.paths import runs_dir
 from benchmark.senior_thesis.scripts.benchmark_suite import _mps_start, _mps_stop
-from simulation.asyncrousnous import _AsyncPlanner, _step_current_async_plan
+from simulation.asyncrousnous import _AsyncPlanner, _step_latest_async_action
 from tasks.go2_walk import Go2Walk
 
 
@@ -270,8 +270,7 @@ def run_trial(
         if hasattr(controller, "warm_start"):
             controller.warm_start(float(mj_data.time))
 
-        planner = _AsyncPlanner(controller, mj_model)
-        planner.reset_active_plan()
+        planner = _AsyncPlanner(controller, mj_model, mj_data)
         tracking_errors = np.zeros(max_steps, dtype=np.float32)
 
         replan_period = 1.0 / FREQUENCY
@@ -280,12 +279,12 @@ def run_trial(
         trial_start = time.perf_counter()
         trial_elapsed = 0.0
         try:
+            planner.start(wait_for_first=True)
             for step_idx in range(max_steps):
                 loop_start = time.perf_counter()
 
                 planner.poll()
-                planner.submit_snapshot(mj_data)
-                _step_current_async_plan(
+                _step_latest_async_action(
                     planner,
                     mj_model,
                     mj_data,
