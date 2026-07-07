@@ -1,20 +1,17 @@
 """DIAL-MPC: diffusion-inspired annealing for sampling-based MPC.
 
-This implementation adapts the DIAL-MPC update used in
-`tmp/dial-mpc/dial_mpc/core/dial_core.py` to this repository's
-cost-minimizing MuJoCo/Warp controller API:
+This implementation follows Hydrax's DIAL controller while preserving this
+repository's stateful MuJoCo/Warp controller API and existing constructor names:
 
     1. warm-start the current mean knot trajectory
     2. run one or more diffusion updates
-           K_i = clip(mu + eps * sigma_h * sigma_traj, u_min, u_max)
-           optionally K_i[0] = mu[0] and include the current mean as a sample
+           K_i = clip(mu + eps * sigma(iteration, horizon), u_min, u_max)
     3. rollout sampled trajectories with the MPPI physics graph
-    4. update the mean with a softmax over normalized negative costs
+    4. update the mean with a softmax over negative costs
 
-DIAL's reference code maximizes normalized rewards.  Here tasks expose costs,
-so the same update is written as `softmax((J_ref - J_i) / (std(J) * temp))`.
-The reference cost is a constant inside the softmax and is used only to match
-the reward-form numerics.
+Hydrax names the two annealing constants `beta_opt_iter` and `beta_horizon`.
+For compatibility, MPPI-Explore keeps the existing keyword names
+`traj_diffuse_factor` and `horizon_diffuse_factor` for those two values.
 """
 
 from __future__ import annotations
@@ -32,11 +29,12 @@ class DIALMPC(MPPI):
 
     DIAL-specific parameter mapping:
         - `sigma_scale` / `noise_level`: base control-node noise scale
-        - `temp_sample` / `temperature`: normalized-cost softmax temperature
+        - `temp_sample` / `temperature`: softmax temperature
         - `num_diffusion_steps` / `iterations`: reverse diffusion updates
-        - `num_initial_diffusion_steps`: first optimize call after reset
-        - `horizon_diffuse_factor`: smaller noise near the start of the horizon
-        - `traj_diffuse_factor`: anneal noise across diffusion updates
+        - `num_initial_diffusion_steps`: accepted for compatibility; Hydrax DIAL
+          uses the regular iteration count for every optimize call
+        - `horizon_diffuse_factor`: Hydrax beta for horizon-level annealing
+        - `traj_diffuse_factor`: Hydrax beta for optimization-iteration annealing
 
     The constructor accepts the existing MPPI names (`noise_level`,
     `temperature`, `iterations`) for compatibility, plus DIAL's names as
@@ -112,15 +110,10 @@ class DIALMPC(MPPI):
             )
 
         self.random_sample_count = int(num_samples)
-        rollout_sample_count = (
-            self.random_sample_count + 1
-            if include_mean_sample
-            else self.random_sample_count
-        )
 
         super().__init__(
             task=task,
-            num_samples=rollout_sample_count,
+            num_samples=int(num_samples),
             noise_level=float(sigma_scale),
             temperature=float(temp_sample),
             plan_horizon=plan_horizon,
@@ -130,14 +123,6 @@ class DIALMPC(MPPI):
             seed=seed,
         )
 
-        # DIAL rolls out actions on linspace(0, Hsample * dt, Hsample + 1).
-        self.ctrl_steps = int(round(self.plan_horizon / self.dt)) + 1
-        self._tq_relative = np.linspace(
-            0.0, self.plan_horizon, self.ctrl_steps, dtype=np.float32,
-        )
-        self._alloc_rollout_buffers()
-        self._rollout_graph = None
-
         self.num_diffusion_steps = int(num_diffusion_steps)
         self.num_initial_diffusion_steps = (
             None
@@ -146,124 +131,58 @@ class DIALMPC(MPPI):
         )
         self.horizon_diffuse_factor = float(horizon_diffuse_factor)
         self.traj_diffuse_factor = float(traj_diffuse_factor)
+        # Accepted as no-op compatibility flags. Hydrax DIAL does not include
+        # a mean sample, fix the first knot, or normalize costs before softmax.
         self.include_mean_sample = bool(include_mean_sample)
         self.fix_first_knot = bool(fix_first_knot)
         self.normalize_costs = bool(normalize_costs)
         self.cost_normalization_eps = float(cost_normalization_eps)
         self.reset_after_warmup = True
-        self.act_before_plan = True
-        self._last_time: Optional[float] = None
-
-        # DIAL samples later horizon nodes more aggressively than near-term
-        # nodes.  The first knot receives the smallest scale and the final knot
-        # receives sigma_scale.
-        horizon_powers = np.arange(self.num_knots, dtype=np.float32)[::-1]
-        self._horizon_noise_scale = (
-            self.noise_level
-            * (self.horizon_diffuse_factor ** horizon_powers)
-        ).astype(np.float32)
-
-        self._optimize_calls = 0
+        self.act_before_plan = False
+        self._opt_iteration = 0
 
     # ------------------------------------------------------------------
     # Algorithm
     # ------------------------------------------------------------------
 
     def optimize(self, mj_data: mujoco.MjData) -> np.ndarray:
-        """Run DIAL-MPC reverse diffusion updates; returns updated mean knots."""
-        self.warm_start(float(mj_data.time))
-        self.set_state_from_mj_data(mj_data)
-        init_state = self._make_initial_state(mj_data)
-
-        num_steps = self.num_diffusion_steps
-        if self._optimize_calls == 0 and self.num_initial_diffusion_steps is not None:
-            num_steps = self.num_initial_diffusion_steps
-
-        for step_idx in range(num_steps):
-            if step_idx > 0:
-                self._restore_state(init_state)
-            traj_scale = self.traj_diffuse_factor ** step_idx
-            noise_scale = self._horizon_noise_scale * np.float32(traj_scale)
-            knots, controls = self.sample_knots(noise_scale=noise_scale)
-            costs = self.rollout(controls)
-            self.update_weights(costs, knots)
-
-        self._optimize_calls += 1
-        return self.mean
+        """Run Hydrax-style DIAL updates; returns updated mean knots."""
+        return super().optimize(mj_data)
 
     def warm_start(self, current_time: float) -> None:
-        """Shift the control sequence the same way DIAL shifts its action buffer."""
-        node_times = np.linspace(
-            0.0, self.plan_horizon, self.num_knots, dtype=np.float32,
-        )
-        self.tk = node_times + np.float32(current_time)
-
-        if self._last_time is None:
-            self._last_time = float(current_time)
-            return
-
-        elapsed = max(float(current_time) - self._last_time, 0.0)
-        shift_steps = int(round(elapsed / self.dt))
-        self._last_time = float(current_time)
-        if shift_steps <= 0:
-            return
-
-        action_times = self._tq_relative
-        actions = self.interp_func(action_times, node_times, self.mean[None, ...])[0]
-        if shift_steps >= self.ctrl_steps:
-            actions[:] = 0.0
-        else:
-            actions = np.roll(actions, -shift_steps, axis=0)
-            actions[-shift_steps:, :] = 0.0
-
-        self.mean = self.interp_func(node_times, action_times, actions[None, ...])[0]
-        self.mean = np.clip(self.mean, self.task.u_min, self.task.u_max).astype(
-            np.float32
-        )
+        """Use the shared Hydrax-style clipped spline warm start."""
+        super().warm_start(current_time)
 
     def sample_knots(
         self,
         noise_scale: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Sample annealed control knots and interpolate them to controls.
-
-        Args:
-            noise_scale:
-                Per-knot scale with shape `(num_knots,)`.  When omitted, the
-                base DIAL horizon scale is used.
-
-        Returns:
-            knots:    `(num_samples, num_knots, nu)`
-            controls: `(num_samples, ctrl_steps, nu)`
-        """
-        if noise_scale is None:
-            noise_scale = self._horizon_noise_scale
-        else:
+        """Sample Hydrax DIAL knots and interpolate them to controls."""
+        if noise_scale is not None:
             noise_scale = np.asarray(noise_scale, dtype=np.float32)
             expected = (self.num_knots,)
             if noise_scale.shape != expected:
                 raise ValueError(
                     f"noise_scale shape {noise_scale.shape} != expected {expected}"
                 )
+        else:
+            horizon_idx = np.arange(self.num_knots, dtype=np.float32)
+            opt_iter = np.float32(self._opt_iteration)
+            noise_scale = self.noise_level * np.exp(
+                -opt_iter / (self.traj_diffuse_factor * self.iterations)
+                - (self.num_knots - 1 - horizon_idx)
+                / (self.horizon_diffuse_factor * self.num_knots)
+            )
+            noise_scale = noise_scale.astype(np.float32)
 
         noise = self.rng.standard_normal(
-            (self.random_sample_count, self.num_knots, self.task.nu),
+            (self.num_samples, self.num_knots, self.task.nu),
         ).astype(np.float32)
-        sampled_knots = self.mean + noise * noise_scale[None, :, None]
-
-        if self.fix_first_knot:
-            sampled_knots[:, 0, :] = self.mean[0, :]
-
-        if self.include_mean_sample:
-            knots = np.concatenate(
-                [sampled_knots, self.mean[None, :, :]], axis=0,
-            )
-        else:
-            knots = sampled_knots
-
+        knots = self.mean + noise * noise_scale[None, :, None]
         knots = np.clip(knots, self.task.u_min, self.task.u_max)
         tq = self._tq_relative + self.tk[0]
         controls = self.interp_func(tq, self.tk, knots)
+        self._opt_iteration = (self._opt_iteration + 1) % self.iterations
         return knots, controls
 
     def update_weights(
@@ -271,21 +190,9 @@ class DIALMPC(MPPI):
         total_costs: np.ndarray,
         knots: np.ndarray,
     ) -> np.ndarray:
-        """DIAL softmax update over normalized negative rollout costs."""
+        """Hydrax DIAL uses the same softmax mean update as MPPI."""
         costs = np.asarray(total_costs, dtype=np.float32)
-
-        if self.normalize_costs:
-            cost_std = float(np.std(costs))
-            norm = max(cost_std, self.cost_normalization_eps)
-        else:
-            norm = 1.0
-
-        if self.include_mean_sample:
-            reference_cost = float(costs[-1])
-        else:
-            reference_cost = float(np.mean(costs))
-
-        shifted = (reference_cost - costs) / (norm * self.temperature)
+        shifted = -costs / self.temperature
         shifted -= shifted.max()
         weights = np.exp(shifted)
         weights /= weights.sum()
@@ -302,8 +209,7 @@ class DIALMPC(MPPI):
         initial_knots: Optional[np.ndarray] = None,
     ) -> None:
         super().reset(seed=seed, initial_knots=initial_knots)
-        self._optimize_calls = 0
-        self._last_time = None
+        self._opt_iteration = 0
 
     # ------------------------------------------------------------------
     # Alias validation

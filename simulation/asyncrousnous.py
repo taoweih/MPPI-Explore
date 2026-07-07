@@ -4,11 +4,12 @@ The deterministic loops in :mod:`simulation.deterministic` are synchronous:
 ``controller.optimize(mj_data)`` blocks, and the live CPU MuJoCo world advances
 only after a new plan is available.
 
-This module models a more robot-like timing contract.  The CPU MuJoCo world
-keeps stepping at the requested control period using the most recently
-committed plan.  A single background worker optimizes from snapshots of the
-live state; when a worker finishes, its plan is atomically committed for later
-CPU steps.  If planning is late, the world does not wait.
+This module follows Hydrax's asynchronous simulation contract.  The CPU MuJoCo
+world keeps stepping in real time with the latest action published by a
+background controller worker.  The worker repeatedly snapshots the latest live
+state, runs one controller optimization, and publishes only the action
+corresponding to that snapshot time.  If planning is late, the world keeps
+using the last published action.
 """
 
 from __future__ import annotations
@@ -49,74 +50,112 @@ class AsyncPlanStats:
 
 
 class _AsyncPlanner:
-    """Single-worker asynchronous wrapper around one controller instance."""
+    """Hydrax-style single-worker async controller wrapper.
 
-    def __init__(self, controller, mj_model: mujoco.MjModel) -> None:
+    Hydrax runs simulator and controller in separate processes connected by
+    shared memory.  MuJoCo/Warp controller objects are not reliably picklable
+    after CUDA graph warm-up, so this repository keeps the same latest-state /
+    latest-action contract inside one process with a single worker thread.
+    """
+
+    def __init__(
+        self,
+        controller,
+        mj_model: mujoco.MjModel,
+        mj_data: mujoco.MjData,
+    ) -> None:
         self.controller = controller
         self.mj_model = mj_model
         self.stats = AsyncPlanStats()
 
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._future: Optional[Future] = None
-        self._plan_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._ready_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._action_lock = threading.Lock()
+        self._optimizing = False
+        self._last_seen_completed = 0
+
+        self._qpos = np.asarray(mj_data.qpos, dtype=np.float64).copy()
+        self._qvel = np.asarray(mj_data.qvel, dtype=np.float64).copy()
+        self._ctrl = np.asarray(mj_data.ctrl, dtype=np.float64).copy()
+        self._act = np.asarray(mj_data.act, dtype=np.float64).copy()
+        self._mocap_pos = np.asarray(mj_data.mocap_pos, dtype=np.float64).copy()
+        self._mocap_quat = np.asarray(mj_data.mocap_quat, dtype=np.float64).copy()
+        self._time = float(mj_data.time)
+
         self._active_tk = np.asarray(controller.tk, dtype=np.float32).copy()
         self._active_mean = np.asarray(controller.mean, dtype=np.float32).copy()
         self._active_snapshot_time = float(self._active_tk[0])
+        self._latest_action = self._action_from_controller(float(mj_data.time))
 
     def reset_active_plan(self) -> None:
         """Refresh the committed plan from the controller's current mean."""
-        with self._plan_lock:
+        with self._action_lock:
             self._active_tk = np.asarray(self.controller.tk, dtype=np.float32).copy()
             self._active_mean = np.asarray(
                 self.controller.mean, dtype=np.float32,
             ).copy()
             self._active_snapshot_time = float(self._active_tk[0])
+            self._latest_action = self._action_from_controller(
+                self._active_snapshot_time,
+            )
+
+    def start(self, *, wait_for_first: bool = True) -> None:
+        """Start the continuous planner loop."""
+        if self._future is not None:
+            return
+        self._future = self._executor.submit(self._run)
+        if wait_for_first:
+            self._ready_event.wait()
+            self._raise_if_failed()
 
     def is_busy(self) -> bool:
-        return self._future is not None and not self._future.done()
+        return self._optimizing
 
     def poll(self) -> bool:
-        """Commit a completed background plan without blocking."""
-        if self._future is None or not self._future.done():
+        """Report whether a new action was published since the previous poll."""
+        self._raise_if_failed()
+        completed = self.stats.completed
+        if completed <= self._last_seen_completed:
             return False
-        result = self._future.result()
-        self._future = None
-        self._commit(result)
+        self._last_seen_completed = completed
         return True
 
     def submit_snapshot(self, mj_data: mujoco.MjData) -> bool:
-        """Submit a plan request from a snapshot of the live CPU state."""
-        self.poll()
-        if self.is_busy():
-            self.stats.skipped_requests += 1
-            return False
-
-        snapshot = mujoco.MjData(self.mj_model)
-        _copy_mj_state(self.mj_model, snapshot, mj_data)
-        submitted_at = time.perf_counter()
-        self._future = self._executor.submit(
-            self._optimize_snapshot,
-            snapshot,
-            submitted_at,
-        )
-        self.stats.submitted += 1
+        """Publish the latest live CPU state for the worker to read."""
+        self.update_state(mj_data)
         return True
 
+    def update_state(self, mj_data: mujoco.MjData) -> None:
+        """Copy the current simulator state into the worker-readable buffer."""
+        with self._state_lock:
+            self._qpos[:] = mj_data.qpos
+            self._qvel[:] = mj_data.qvel
+            self._ctrl[:] = mj_data.ctrl
+            self._time = float(mj_data.time)
+            if self._act.shape[0] > 0 and mj_data.act.shape[0] > 0:
+                self._act[:] = mj_data.act
+            if self._mocap_pos.shape[0] > 0:
+                self._mocap_pos[:] = mj_data.mocap_pos
+                self._mocap_quat[:] = mj_data.mocap_quat
+
+    def get_action(self) -> np.ndarray:
+        """Return the latest action published by the background optimizer."""
+        with self._action_lock:
+            return self._latest_action.copy()
+
     def get_actions(self, query_times: np.ndarray) -> np.ndarray:
-        """Return controls from the latest committed plan for ``query_times``."""
-        with self._plan_lock:
-            tk = self._active_tk.copy()
-            mean = self._active_mean.copy()
-        safe_times = np.clip(
-            np.asarray(query_times, dtype=np.float32),
-            float(tk[0]),
-            float(tk[-1]),
-        )
-        return self.controller.interp_func(safe_times, tk, mean[None, ...])[0]
+        """Return latest-action zero-order hold controls for ``query_times``."""
+        query_count = len(np.asarray(query_times))
+        with self._action_lock:
+            action = self._latest_action.copy()
+        return np.repeat(action[None, :], repeats=query_count, axis=0)
 
     def get_plan_copy(self) -> tuple[np.ndarray, np.ndarray, float]:
-        """Copy the committed plan for trace prediction or diagnostics."""
-        with self._plan_lock:
+        """Copy the latest optimized plan for trace prediction or diagnostics."""
+        with self._action_lock:
             return (
                 self._active_tk.copy(),
                 self._active_mean.copy(),
@@ -124,41 +163,79 @@ class _AsyncPlanner:
             )
 
     def drain(self, *, commit: bool = True) -> None:
-        """Wait for an in-flight plan at shutdown or trial boundaries."""
-        if self._future is None:
-            return
-        result = self._future.result()
-        self._future = None
-        if commit:
-            self._commit(result)
+        """Stop the continuous worker, waiting for the in-flight optimize."""
+        del commit
+        self.close()
 
     def close(self) -> None:
-        self.drain(commit=False)
+        if self._future is not None:
+            self._stop_event.set()
+            self._future.result()
+            self._future = None
         self._executor.shutdown(wait=True)
 
-    def _optimize_snapshot(
-        self,
-        snapshot: mujoco.MjData,
-        submitted_at: float,
-    ) -> tuple[np.ndarray, np.ndarray, float, float]:
-        self.controller.optimize(snapshot)
-        plan_time = time.perf_counter() - submitted_at
-        return (
-            np.asarray(self.controller.tk, dtype=np.float32).copy(),
-            np.asarray(self.controller.mean, dtype=np.float32).copy(),
-            float(snapshot.time),
-            float(plan_time),
-        )
+    def _copy_state_to_snapshot(self, snapshot: mujoco.MjData) -> float:
+        with self._state_lock:
+            snapshot.qpos[:] = self._qpos
+            snapshot.qvel[:] = self._qvel
+            snapshot.ctrl[:] = self._ctrl
+            snapshot.time = self._time
+            if snapshot.act.shape[0] > 0 and self._act.shape[0] > 0:
+                snapshot.act[:] = self._act
+            if self._mocap_pos.shape[0] > 0:
+                snapshot.mocap_pos[:] = self._mocap_pos
+                snapshot.mocap_quat[:] = self._mocap_quat
+            snapshot_time = self._time
+        mujoco.mj_forward(self.mj_model, snapshot)
+        return snapshot_time
 
-    def _commit(self, result: tuple[np.ndarray, np.ndarray, float, float]) -> None:
-        tk, mean, snapshot_time, plan_time = result
-        with self._plan_lock:
-            self._active_tk = tk
-            self._active_mean = mean
-            self._active_snapshot_time = snapshot_time
-        self.stats.completed += 1
-        self.stats.plan_times.append(plan_time)
-        self.stats.snapshot_times.append(snapshot_time)
+    def _action_from_controller(self, t: float) -> np.ndarray:
+        if hasattr(self.controller, "get_action"):
+            action = self.controller.get_action(float(t))
+        else:
+            tk = self._active_tk.copy()
+            mean = self._active_mean.copy()
+            safe_t = np.clip(np.float32(t), float(tk[0]), float(tk[-1]))
+            action = self.controller.interp_func(
+                np.array([safe_t], dtype=np.float32),
+                tk,
+                mean[None, ...],
+            )[0, 0, :]
+        return np.asarray(action, dtype=np.float32).copy()
+
+    def _run(self) -> None:
+        snapshot = mujoco.MjData(self.mj_model)
+        try:
+            while not self._stop_event.is_set():
+                snapshot_time = self._copy_state_to_snapshot(snapshot)
+                submitted_at = time.perf_counter()
+                self.stats.submitted += 1
+                self._optimizing = True
+                try:
+                    self.controller.optimize(snapshot)
+                finally:
+                    self._optimizing = False
+                plan_time = time.perf_counter() - submitted_at
+                tk = np.asarray(self.controller.tk, dtype=np.float32).copy()
+                mean = np.asarray(self.controller.mean, dtype=np.float32).copy()
+                action = self._action_from_controller(snapshot_time)
+                with self._action_lock:
+                    self._active_tk = tk
+                    self._active_mean = mean
+                    self._active_snapshot_time = float(snapshot_time)
+                    self._latest_action = action
+                    self.stats.completed += 1
+                    self.stats.plan_times.append(float(plan_time))
+                    self.stats.snapshot_times.append(float(snapshot_time))
+                self._ready_event.set()
+        finally:
+            self._ready_event.set()
+
+    def _raise_if_failed(self) -> None:
+        if self._future is not None and self._future.done():
+            exc = self._future.exception()
+            if exc is not None:
+                raise exc
 
 
 def _warmup_controller(controller, mj_data: mujoco.MjData) -> None:
@@ -171,19 +248,18 @@ def _warmup_controller(controller, mj_data: mujoco.MjData) -> None:
     print(f"Warm-up took {time.time() - st:.3f}s")
 
 
-def _step_current_async_plan(
+def _step_latest_async_action(
     planner: _AsyncPlanner,
     mj_model: mujoco.MjModel,
     mj_data: mujoco.MjData,
     sim_steps_per_replan: int,
 ) -> None:
-    sim_dt = float(mj_model.opt.timestep)
-    t_curr = float(mj_data.time)
-    tq = np.arange(sim_steps_per_replan, dtype=np.float32) * sim_dt + t_curr
-    actions = planner.get_actions(tq.astype(np.float32))
-    for action in actions:
+    for _ in range(sim_steps_per_replan):
+        planner.update_state(mj_data)
+        action = planner.get_action()
         planner.controller.task.apply_control_cpu(mj_data, action)
         mujoco.mj_step(mj_model, mj_data)
+    planner.update_state(mj_data)
 
 
 def _predict_nominal_traces_from_plan(
@@ -264,10 +340,9 @@ def run_interactive_async(
 ) -> list[float]:
     """Run an interactive asynchronous MPC simulation.
 
-    The live CPU world advances every control period with the last committed
-    plan.  At the start of each period, a background plan request is submitted
-    if the previous request has finished; otherwise the request is skipped and
-    the CPU world keeps moving.
+    The live CPU world advances with the latest action published by a background
+    optimizer.  The optimizer runs continuously from snapshots of the latest
+    state, matching Hydrax's asynchronous simulation contract.
     """
     print(
         f"Planning with {controller.ctrl_steps} steps "
@@ -280,7 +355,7 @@ def run_interactive_async(
     step_dt = sim_steps_per_replan * mj_model.opt.timestep
     actual_frequency = 1.0 / step_dt
     print(
-        f"Requesting plans at {actual_frequency:.1f} Hz, "
+        f"Updating viewer/status at {actual_frequency:.1f} Hz, "
         f"simulating at {1.0 / mj_model.opt.timestep:.1f} Hz"
     )
 
@@ -293,8 +368,7 @@ def run_interactive_async(
     if hasattr(controller, "warm_start"):
         controller.warm_start(float(mj_data.time))
 
-    planner = _AsyncPlanner(controller, mj_model)
-    planner.reset_active_plan()
+    planner = _AsyncPlanner(controller, mj_model, mj_data)
 
     screenshot_pending = bool(take_screenshot and screenshot_path is not None)
     if screenshot_pending and screenshot_step <= 0:
@@ -369,6 +443,7 @@ def run_interactive_async(
                     )
                     viewer.user_scn.ngeom += 1
 
+            planner.start(wait_for_first=True)
             for step_idx in range(max_steps):
                 start_time = time.time()
 
@@ -381,8 +456,7 @@ def run_interactive_async(
                 ):
                     visualize_fn(controller, step_idx)
 
-                planner.submit_snapshot(mj_data)
-                _step_current_async_plan(
+                _step_latest_async_action(
                     planner,
                     mj_model,
                     mj_data,
@@ -545,7 +619,7 @@ def run_benchmark_async(
     step_dt = sim_steps_per_replan * mj_model.opt.timestep
     actual_frequency = 1.0 / step_dt
     print(
-        f"Requesting plans at {actual_frequency:.1f} Hz, "
+        f"Recording state/action at {actual_frequency:.1f} Hz, "
         f"simulating at {1.0 / mj_model.opt.timestep:.1f} Hz"
     )
 
@@ -592,9 +666,6 @@ def run_benchmark_async(
         if hasattr(controller, "warm_start"):
             controller.warm_start(float(mj_data.time))
 
-        planner = _AsyncPlanner(controller, mj_model)
-        planner.reset_active_plan()
-
         recorder = None
         renderer = None
         if record_video and trial_idx == video_trial_index:
@@ -619,14 +690,15 @@ def run_benchmark_async(
         reached_goal = False
         trial_start = time.perf_counter()
         trial_elapsed = 0.0
+        planner = _AsyncPlanner(controller, mj_model, mj_data)
 
         try:
+            planner.start(wait_for_first=True)
             for iter_idx in range(max_iterations):
                 loop_start = time.perf_counter()
 
                 planner.poll()
-                planner.submit_snapshot(mj_data)
-                _step_current_async_plan(
+                _step_latest_async_action(
                     planner,
                     mj_model,
                     mj_data,

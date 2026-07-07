@@ -35,11 +35,11 @@ from tasks import Ant
 
 
 # Horizon sweep
-HORIZONS = np.linspace(0.5, 8.0, 10)
+HORIZONS = np.linspace(0.5, 8.0, 20)
 NUM_SAMPLES_FOR_HORIZON_SWEEP = 1024
 
 # Sample-count sweep
-NUM_SAMPLES_LIST = np.linspace(128, 2048, 10, dtype=int).tolist()
+NUM_SAMPLES_LIST = np.linspace(128, 2048, 20, dtype=int).tolist()
 HORIZON_FOR_SAMPLE_SWEEP = 4.0
 
 # Trial settings
@@ -54,13 +54,13 @@ OUTPUT_NAME = "ant_mppi_vs_density_kde_vs_knn_vs_knn_task_state_vs_dial"
 
 # Parallelism: "sequential", "controllers", "axis", or "all"
 PARALLEL = "all"
-MAX_WORKERS = "40"  # int or "auto" (= total jobs in batch)
+MAX_WORKERS = "20"  # int or "auto" (= total jobs in batch)
 NUM_GPUS = 2
 FREQ_CALIBRATION_ITERS = 50
 
 # Shared MPPI parameters
 NOISE_LEVEL = 0.3
-TEMPERATURE = 0.00001
+TEMPERATURE = 0.001
 NUM_KNOTS = 16
 ITERATIONS = 1
 SEED = 0

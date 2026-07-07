@@ -186,7 +186,8 @@ class BaseMPPI(ABC):
             np.linspace(0.0, self.plan_horizon, self.num_knots, dtype=np.float32)
             + current_time
         )
-        new_mean = self.interp_func(new_tk, self.tk, self.mean[None, ...])[0]
+        query_tk = np.clip(new_tk, float(self.tk[0]), float(self.tk[-1]))
+        new_mean = self.interp_func(query_tk, self.tk, self.mean[None, ...])[0]
         self.tk = new_tk
         self.mean = new_mean
 
