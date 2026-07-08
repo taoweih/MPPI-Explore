@@ -180,46 +180,16 @@ class KNNDensityModel(DensityModel):
 
     def launch_compute(self, states_wp: wp.array) -> None:
         """Compute joint-aware kNN density for each configured state sample."""
-        zero_scale_kernel = getattr(type(self), "_zero_semantic_scale_kernel", None)
-        if zero_scale_kernel is None:
+        scale_kernel = getattr(type(self), "_batch_semantic_scale_kernel", None)
+        if scale_kernel is None:
             @wp.kernel
-            def zero_semantic_scale(
+            def batch_semantic_scale(
+                states:         wp.array2d(dtype=wp.float32),
                 position_scale: wp.array1d(dtype=wp.float32),
                 angle_scale:    wp.array1d(dtype=wp.float32),
                 linvel_scale:   wp.array1d(dtype=wp.float32),
                 angvel_scale:   wp.array1d(dtype=wp.float32),
                 task_scale:     wp.array1d(dtype=wp.float32),
-                num_joints:     int,
-                task_state_dim: int,
-            ):
-                tid = wp.tid()
-
-                if tid < num_joints:
-                    position_scale[tid] = float(0.0)
-                    angle_scale[tid] = float(0.0)
-                    linvel_scale[tid] = float(0.0)
-                    angvel_scale[tid] = float(0.0)
-                    return
-
-                task_d = tid - num_joints
-                if task_d < task_state_dim:
-                    task_scale[task_d] = float(0.0)
-
-            type(self)._zero_semantic_scale_kernel = zero_semantic_scale
-            zero_scale_kernel = zero_semantic_scale
-
-        accumulate_scale_kernel = getattr(
-            type(self), "_accumulate_semantic_scale_kernel", None,
-        )
-        if accumulate_scale_kernel is None:
-            @wp.kernel
-            def accumulate_semantic_scale(
-                states:         wp.array2d(dtype=wp.float32),
-                position_sum:   wp.array1d(dtype=wp.float32),
-                angle_sum:      wp.array1d(dtype=wp.float32),
-                linvel_sum:     wp.array1d(dtype=wp.float32),
-                angvel_sum:     wp.array1d(dtype=wp.float32),
-                task_sum:       wp.array1d(dtype=wp.float32),
                 joint_type:     wp.array1d(dtype=wp.int32),
                 qposadr:        wp.array1d(dtype=wp.int32),
                 dofadr:         wp.array1d(dtype=wp.int32),
@@ -228,127 +198,11 @@ class KNNDensityModel(DensityModel):
                 nv:             int,
                 num_joints:     int,
                 task_state_dim: int,
-            ):
-                tid = wp.tid()
-                component = tid // N
-                a = tid - component * N
-                PI = float(3.141592653589793)
-                TWO_PI = float(6.283185307179586)
-
-                if component < num_joints:
-                    jt = joint_type[component]
-                    qp = qposadr[component]
-                    dv = dofadr[component]
-
-                    pos_local = float(0.0)
-                    angle_local = float(0.0)
-                    linvel_local = float(0.0)
-                    angvel_local = float(0.0)
-
-                    for b in range(N):
-                        if a == b:
-                            continue
-
-                        if jt == 0:  # free
-                            pos_sq = float(0.0)
-                            for d in range(3):
-                                diff = states[a, qp + d] - states[b, qp + d]
-                                pos_sq = pos_sq + diff * diff
-                            pos_local = pos_local + pos_sq
-
-                            dot = (
-                                states[a, qp + 3] * states[b, qp + 3]
-                                + states[a, qp + 4] * states[b, qp + 4]
-                                + states[a, qp + 5] * states[b, qp + 5]
-                                + states[a, qp + 6] * states[b, qp + 6]
-                            )
-                            if dot < 0.0:
-                                dot = -dot
-                            dot = wp.clamp(dot, 0.0, 1.0)
-                            angle = 2.0 * wp.acos(dot)
-                            angle_local = angle_local + angle * angle
-
-                            linvel_sq = float(0.0)
-                            for d in range(3):
-                                diff = states[a, nq + dv + d] - states[b, nq + dv + d]
-                                linvel_sq = linvel_sq + diff * diff
-                            linvel_local = linvel_local + linvel_sq
-
-                            angvel_sq = float(0.0)
-                            for d in range(3, 6):
-                                diff = states[a, nq + dv + d] - states[b, nq + dv + d]
-                                angvel_sq = angvel_sq + diff * diff
-                            angvel_local = angvel_local + angvel_sq
-
-                        elif jt == 1:  # ball
-                            dot = (
-                                states[a, qp] * states[b, qp]
-                                + states[a, qp + 1] * states[b, qp + 1]
-                                + states[a, qp + 2] * states[b, qp + 2]
-                                + states[a, qp + 3] * states[b, qp + 3]
-                            )
-                            if dot < 0.0:
-                                dot = -dot
-                            dot = wp.clamp(dot, 0.0, 1.0)
-                            angle = 2.0 * wp.acos(dot)
-                            angle_local = angle_local + angle * angle
-
-                            angvel_sq = float(0.0)
-                            for d in range(3):
-                                diff = states[a, nq + dv + d] - states[b, nq + dv + d]
-                                angvel_sq = angvel_sq + diff * diff
-                            angvel_local = angvel_local + angvel_sq
-
-                        elif jt == 2:  # slide
-                            diff = states[a, qp] - states[b, qp]
-                            pos_local = pos_local + diff * diff
-
-                            vdiff = states[a, nq + dv] - states[b, nq + dv]
-                            linvel_local = linvel_local + vdiff * vdiff
-
-                        else:  # hinge
-                            diff = states[a, qp] - states[b, qp]
-                            diff = diff - TWO_PI * wp.floor((diff + PI) / TWO_PI)
-                            angle_local = angle_local + diff * diff
-
-                            vdiff = states[a, nq + dv] - states[b, nq + dv]
-                            angvel_local = angvel_local + vdiff * vdiff
-
-                    wp.atomic_add(position_sum, component, pos_local)
-                    wp.atomic_add(angle_sum, component, angle_local)
-                    wp.atomic_add(linvel_sum, component, linvel_local)
-                    wp.atomic_add(angvel_sum, component, angvel_local)
-                    return
-
-                task_d = component - num_joints
-                if task_d < task_state_dim:
-                    offset = nq + nv
-                    task_local = float(0.0)
-                    for b in range(N):
-                        if a == b:
-                            continue
-                        diff = states[a, offset + task_d] - states[b, offset + task_d]
-                        task_local = task_local + diff * diff
-                    wp.atomic_add(task_sum, task_d, task_local)
-
-            type(self)._accumulate_semantic_scale_kernel = accumulate_semantic_scale
-            accumulate_scale_kernel = accumulate_semantic_scale
-
-        finalize_scale_kernel = getattr(type(self), "_finalize_semantic_scale_kernel", None)
-        if finalize_scale_kernel is None:
-            @wp.kernel
-            def finalize_semantic_scale(
-                position_scale: wp.array1d(dtype=wp.float32),
-                angle_scale:    wp.array1d(dtype=wp.float32),
-                linvel_scale:   wp.array1d(dtype=wp.float32),
-                angvel_scale:   wp.array1d(dtype=wp.float32),
-                task_scale:     wp.array1d(dtype=wp.float32),
-                N:              int,
-                num_joints:     int,
-                task_state_dim: int,
                 min_scale:      float,
             ):
                 tid = wp.tid()
+                PI = float(3.141592653589793)
+                TWO_PI = float(6.283185307179586)
 
                 if N <= 1:
                     if tid < num_joints:
@@ -362,50 +216,329 @@ class KNNDensityModel(DensityModel):
                             task_scale[task_d] = float(1.0)
                     return
 
-                denom = 2.0 * float(N) * float(N - 1)
+                denom = float(N - 1)
 
                 if tid < num_joints:
-                    pos_scale = wp.sqrt(position_scale[tid] / denom)
-                    angle_scale_v = wp.sqrt(angle_scale[tid] / denom)
-                    linvel_scale_v = wp.sqrt(linvel_scale[tid] / denom)
-                    angvel_scale_v = wp.sqrt(angvel_scale[tid] / denom)
+                    jt = joint_type[tid]
+                    qp = qposadr[tid]
+                    dv = dofadr[tid]
 
-                    if pos_scale < min_scale:
-                        pos_scale = min_scale
-                    if angle_scale_v < min_scale:
-                        angle_scale_v = min_scale
-                    if linvel_scale_v < min_scale:
-                        linvel_scale_v = min_scale
-                    if angvel_scale_v < min_scale:
-                        angvel_scale_v = min_scale
+                    # Set unused semantic groups to a harmless finite value.
+                    position_scale[tid] = float(1.0)
+                    angle_scale[tid] = float(1.0)
+                    linvel_scale[tid] = float(1.0)
+                    angvel_scale[tid] = float(1.0)
 
-                    position_scale[tid] = pos_scale
-                    angle_scale[tid] = angle_scale_v
-                    linvel_scale[tid] = linvel_scale_v
-                    angvel_scale[tid] = angvel_scale_v
+                    if jt == 0:  # free: xyz + quaternion, linear + angular velocity
+                        pos_sum_0 = float(0.0)
+                        pos_sum_1 = float(0.0)
+                        pos_sum_2 = float(0.0)
+                        pos_sq_sum = float(0.0)
+                        lin_sum_0 = float(0.0)
+                        lin_sum_1 = float(0.0)
+                        lin_sum_2 = float(0.0)
+                        lin_sq_sum = float(0.0)
+                        ang_sum_0 = float(0.0)
+                        ang_sum_1 = float(0.0)
+                        ang_sum_2 = float(0.0)
+                        ang_sq_sum = float(0.0)
+
+                        ref_0 = states[0, qp + 3]
+                        ref_1 = states[0, qp + 4]
+                        ref_2 = states[0, qp + 5]
+                        ref_3 = states[0, qp + 6]
+                        quat_sum_0 = float(0.0)
+                        quat_sum_1 = float(0.0)
+                        quat_sum_2 = float(0.0)
+                        quat_sum_3 = float(0.0)
+
+                        for i in range(N):
+                            p0 = states[i, qp]
+                            p1 = states[i, qp + 1]
+                            p2 = states[i, qp + 2]
+                            pos_sum_0 = pos_sum_0 + p0
+                            pos_sum_1 = pos_sum_1 + p1
+                            pos_sum_2 = pos_sum_2 + p2
+                            pos_sq_sum = pos_sq_sum + p0 * p0 + p1 * p1 + p2 * p2
+
+                            q0 = states[i, qp + 3]
+                            q1 = states[i, qp + 4]
+                            q2 = states[i, qp + 5]
+                            q3 = states[i, qp + 6]
+                            sign = float(1.0)
+                            if q0 * ref_0 + q1 * ref_1 + q2 * ref_2 + q3 * ref_3 < 0.0:
+                                sign = -1.0
+                            quat_sum_0 = quat_sum_0 + sign * q0
+                            quat_sum_1 = quat_sum_1 + sign * q1
+                            quat_sum_2 = quat_sum_2 + sign * q2
+                            quat_sum_3 = quat_sum_3 + sign * q3
+
+                            v0 = states[i, nq + dv]
+                            v1 = states[i, nq + dv + 1]
+                            v2 = states[i, nq + dv + 2]
+                            lin_sum_0 = lin_sum_0 + v0
+                            lin_sum_1 = lin_sum_1 + v1
+                            lin_sum_2 = lin_sum_2 + v2
+                            lin_sq_sum = lin_sq_sum + v0 * v0 + v1 * v1 + v2 * v2
+
+                            w0 = states[i, nq + dv + 3]
+                            w1 = states[i, nq + dv + 4]
+                            w2 = states[i, nq + dv + 5]
+                            ang_sum_0 = ang_sum_0 + w0
+                            ang_sum_1 = ang_sum_1 + w1
+                            ang_sum_2 = ang_sum_2 + w2
+                            ang_sq_sum = ang_sq_sum + w0 * w0 + w1 * w1 + w2 * w2
+
+                        inv_N = 1.0 / float(N)
+                        pos_ssd = (
+                            pos_sq_sum
+                            - (pos_sum_0 * pos_sum_0
+                               + pos_sum_1 * pos_sum_1
+                               + pos_sum_2 * pos_sum_2) * inv_N
+                        )
+                        if pos_ssd < 0.0:
+                            pos_ssd = 0.0
+                        pos_scale = wp.sqrt(pos_ssd / denom)
+                        if pos_scale < min_scale:
+                            pos_scale = min_scale
+                        position_scale[tid] = pos_scale
+
+                        lin_ssd = (
+                            lin_sq_sum
+                            - (lin_sum_0 * lin_sum_0
+                               + lin_sum_1 * lin_sum_1
+                               + lin_sum_2 * lin_sum_2) * inv_N
+                        )
+                        if lin_ssd < 0.0:
+                            lin_ssd = 0.0
+                        lin_scale = wp.sqrt(lin_ssd / denom)
+                        if lin_scale < min_scale:
+                            lin_scale = min_scale
+                        linvel_scale[tid] = lin_scale
+
+                        ang_ssd = (
+                            ang_sq_sum
+                            - (ang_sum_0 * ang_sum_0
+                               + ang_sum_1 * ang_sum_1
+                               + ang_sum_2 * ang_sum_2) * inv_N
+                        )
+                        if ang_ssd < 0.0:
+                            ang_ssd = 0.0
+                        ang_scale = wp.sqrt(ang_ssd / denom)
+                        if ang_scale < min_scale:
+                            ang_scale = min_scale
+                        angvel_scale[tid] = ang_scale
+
+                        q_norm = wp.sqrt(
+                            quat_sum_0 * quat_sum_0
+                            + quat_sum_1 * quat_sum_1
+                            + quat_sum_2 * quat_sum_2
+                            + quat_sum_3 * quat_sum_3
+                        )
+                        if q_norm < min_scale:
+                            quat_sum_0 = ref_0
+                            quat_sum_1 = ref_1
+                            quat_sum_2 = ref_2
+                            quat_sum_3 = ref_3
+                        else:
+                            inv_q_norm = 1.0 / q_norm
+                            quat_sum_0 = quat_sum_0 * inv_q_norm
+                            quat_sum_1 = quat_sum_1 * inv_q_norm
+                            quat_sum_2 = quat_sum_2 * inv_q_norm
+                            quat_sum_3 = quat_sum_3 * inv_q_norm
+
+                        angle_ssd = float(0.0)
+                        for i in range(N):
+                            dot = (
+                                states[i, qp + 3] * quat_sum_0
+                                + states[i, qp + 4] * quat_sum_1
+                                + states[i, qp + 5] * quat_sum_2
+                                + states[i, qp + 6] * quat_sum_3
+                            )
+                            if dot < 0.0:
+                                dot = -dot
+                            dot = wp.clamp(dot, 0.0, 1.0)
+                            angle = 2.0 * wp.acos(dot)
+                            angle_ssd = angle_ssd + angle * angle
+                        q_scale = wp.sqrt(angle_ssd / denom)
+                        if q_scale < min_scale:
+                            q_scale = min_scale
+                        angle_scale[tid] = q_scale
+                        return
+
+                    if jt == 1:  # ball: quaternion, angular velocity
+                        ref_0 = states[0, qp]
+                        ref_1 = states[0, qp + 1]
+                        ref_2 = states[0, qp + 2]
+                        ref_3 = states[0, qp + 3]
+                        quat_sum_0 = float(0.0)
+                        quat_sum_1 = float(0.0)
+                        quat_sum_2 = float(0.0)
+                        quat_sum_3 = float(0.0)
+                        ang_sum_0 = float(0.0)
+                        ang_sum_1 = float(0.0)
+                        ang_sum_2 = float(0.0)
+                        ang_sq_sum = float(0.0)
+
+                        for i in range(N):
+                            q0 = states[i, qp]
+                            q1 = states[i, qp + 1]
+                            q2 = states[i, qp + 2]
+                            q3 = states[i, qp + 3]
+                            sign = float(1.0)
+                            if q0 * ref_0 + q1 * ref_1 + q2 * ref_2 + q3 * ref_3 < 0.0:
+                                sign = -1.0
+                            quat_sum_0 = quat_sum_0 + sign * q0
+                            quat_sum_1 = quat_sum_1 + sign * q1
+                            quat_sum_2 = quat_sum_2 + sign * q2
+                            quat_sum_3 = quat_sum_3 + sign * q3
+
+                            w0 = states[i, nq + dv]
+                            w1 = states[i, nq + dv + 1]
+                            w2 = states[i, nq + dv + 2]
+                            ang_sum_0 = ang_sum_0 + w0
+                            ang_sum_1 = ang_sum_1 + w1
+                            ang_sum_2 = ang_sum_2 + w2
+                            ang_sq_sum = ang_sq_sum + w0 * w0 + w1 * w1 + w2 * w2
+
+                        inv_N = 1.0 / float(N)
+                        ang_ssd = (
+                            ang_sq_sum
+                            - (ang_sum_0 * ang_sum_0
+                               + ang_sum_1 * ang_sum_1
+                               + ang_sum_2 * ang_sum_2) * inv_N
+                        )
+                        if ang_ssd < 0.0:
+                            ang_ssd = 0.0
+                        ang_scale = wp.sqrt(ang_ssd / denom)
+                        if ang_scale < min_scale:
+                            ang_scale = min_scale
+                        angvel_scale[tid] = ang_scale
+
+                        q_norm = wp.sqrt(
+                            quat_sum_0 * quat_sum_0
+                            + quat_sum_1 * quat_sum_1
+                            + quat_sum_2 * quat_sum_2
+                            + quat_sum_3 * quat_sum_3
+                        )
+                        if q_norm < min_scale:
+                            quat_sum_0 = ref_0
+                            quat_sum_1 = ref_1
+                            quat_sum_2 = ref_2
+                            quat_sum_3 = ref_3
+                        else:
+                            inv_q_norm = 1.0 / q_norm
+                            quat_sum_0 = quat_sum_0 * inv_q_norm
+                            quat_sum_1 = quat_sum_1 * inv_q_norm
+                            quat_sum_2 = quat_sum_2 * inv_q_norm
+                            quat_sum_3 = quat_sum_3 * inv_q_norm
+
+                        angle_ssd = float(0.0)
+                        for i in range(N):
+                            dot = (
+                                states[i, qp] * quat_sum_0
+                                + states[i, qp + 1] * quat_sum_1
+                                + states[i, qp + 2] * quat_sum_2
+                                + states[i, qp + 3] * quat_sum_3
+                            )
+                            if dot < 0.0:
+                                dot = -dot
+                            dot = wp.clamp(dot, 0.0, 1.0)
+                            angle = 2.0 * wp.acos(dot)
+                            angle_ssd = angle_ssd + angle * angle
+                        q_scale = wp.sqrt(angle_ssd / denom)
+                        if q_scale < min_scale:
+                            q_scale = min_scale
+                        angle_scale[tid] = q_scale
+                        return
+
+                    if jt == 2:  # slide: scalar position, linear velocity
+                        pos_sum = float(0.0)
+                        pos_sq_sum = float(0.0)
+                        vel_sum = float(0.0)
+                        vel_sq_sum = float(0.0)
+                        for i in range(N):
+                            p = states[i, qp]
+                            v = states[i, nq + dv]
+                            pos_sum = pos_sum + p
+                            pos_sq_sum = pos_sq_sum + p * p
+                            vel_sum = vel_sum + v
+                            vel_sq_sum = vel_sq_sum + v * v
+
+                        inv_N = 1.0 / float(N)
+                        pos_ssd = pos_sq_sum - pos_sum * pos_sum * inv_N
+                        if pos_ssd < 0.0:
+                            pos_ssd = 0.0
+                        pos_scale = wp.sqrt(pos_ssd / denom)
+                        if pos_scale < min_scale:
+                            pos_scale = min_scale
+                        position_scale[tid] = pos_scale
+
+                        vel_ssd = vel_sq_sum - vel_sum * vel_sum * inv_N
+                        if vel_ssd < 0.0:
+                            vel_ssd = 0.0
+                        vel_scale = wp.sqrt(vel_ssd / denom)
+                        if vel_scale < min_scale:
+                            vel_scale = min_scale
+                        linvel_scale[tid] = vel_scale
+                        return
+
+                    # hinge: wrapped scalar angle, angular velocity
+                    sin_sum = float(0.0)
+                    cos_sum = float(0.0)
+                    vel_sum = float(0.0)
+                    vel_sq_sum = float(0.0)
+                    for i in range(N):
+                        theta = states[i, qp]
+                        sin_sum = sin_sum + wp.sin(theta)
+                        cos_sum = cos_sum + wp.cos(theta)
+                        v = states[i, nq + dv]
+                        vel_sum = vel_sum + v
+                        vel_sq_sum = vel_sq_sum + v * v
+
+                    mean_angle = wp.atan2(sin_sum, cos_sum)
+                    angle_ssd = float(0.0)
+                    for i in range(N):
+                        diff = states[i, qp] - mean_angle
+                        diff = diff - TWO_PI * wp.floor((diff + PI) / TWO_PI)
+                        angle_ssd = angle_ssd + diff * diff
+                    h_scale = wp.sqrt(angle_ssd / denom)
+                    if h_scale < min_scale:
+                        h_scale = min_scale
+                    angle_scale[tid] = h_scale
+
+                    inv_N = 1.0 / float(N)
+                    vel_ssd = vel_sq_sum - vel_sum * vel_sum * inv_N
+                    if vel_ssd < 0.0:
+                        vel_ssd = 0.0
+                    vel_scale = wp.sqrt(vel_ssd / denom)
+                    if vel_scale < min_scale:
+                        vel_scale = min_scale
+                    angvel_scale[tid] = vel_scale
                     return
 
                 task_d = tid - num_joints
                 if task_d < task_state_dim:
-                    scale = wp.sqrt(task_scale[task_d] / denom)
+                    offset = nq + nv + task_d
+                    value_sum = float(0.0)
+                    value_sq_sum = float(0.0)
+                    for i in range(N):
+                        value = states[i, offset]
+                        value_sum = value_sum + value
+                        value_sq_sum = value_sq_sum + value * value
+                    inv_N = 1.0 / float(N)
+                    value_ssd = value_sq_sum - value_sum * value_sum * inv_N
+                    if value_ssd < 0.0:
+                        value_ssd = 0.0
+                    scale = wp.sqrt(value_ssd / denom)
                     if scale < min_scale:
                         scale = min_scale
                     task_scale[task_d] = scale
 
-            type(self)._finalize_semantic_scale_kernel = finalize_semantic_scale
-            finalize_scale_kernel = finalize_semantic_scale
+            type(self)._batch_semantic_scale_kernel = batch_semantic_scale
+            scale_kernel = batch_semantic_scale
 
-        scale_dim = self._num_joints + self._task_state_dim
-        wp.launch(zero_scale_kernel, dim=scale_dim, inputs=[
-            self._position_scale_wp,
-            self._angle_scale_wp,
-            self._linear_velocity_scale_wp,
-            self._angular_velocity_scale_wp,
-            self._task_state_scale_wp,
-            self._num_joints,
-            self._task_state_dim,
-        ])
-        wp.launch(accumulate_scale_kernel, dim=scale_dim * self._num_samples, inputs=[
+        wp.launch(scale_kernel, dim=self._num_joints + self._task_state_dim, inputs=[
             states_wp,
             self._position_scale_wp,
             self._angle_scale_wp,
@@ -418,16 +551,6 @@ class KNNDensityModel(DensityModel):
             self._num_samples,
             self._nq,
             self._nv,
-            self._num_joints,
-            self._task_state_dim,
-        ])
-        wp.launch(finalize_scale_kernel, dim=scale_dim, inputs=[
-            self._position_scale_wp,
-            self._angle_scale_wp,
-            self._linear_velocity_scale_wp,
-            self._angular_velocity_scale_wp,
-            self._task_state_scale_wp,
-            self._num_samples,
             self._num_joints,
             self._task_state_dim,
             self.min_scale,
