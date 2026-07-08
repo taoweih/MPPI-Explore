@@ -278,6 +278,7 @@ def run_trial(
         step_dt = float(sim_steps_per_replan * mj_model.opt.timestep)
         trial_start = time.perf_counter()
         trial_elapsed = 0.0
+        trial_completed = 0
         try:
             planner.start(wait_for_first=True)
             for step_idx in range(max_steps):
@@ -301,10 +302,11 @@ def run_trial(
         finally:
             if trial_elapsed == 0.0:
                 trial_elapsed = time.perf_counter() - trial_start
+            trial_completed = planner.stats.completed
             planner.drain(commit=False)
             planner.close()
 
-        control_hz = planner.stats.completed / max(trial_elapsed, 1e-9)
+        control_hz = trial_completed / max(trial_elapsed, 1e-9)
         return float(tracking_errors.mean()), float(control_hz)
 
     if simulation_mode != "deterministic":

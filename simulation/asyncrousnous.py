@@ -690,6 +690,7 @@ def run_benchmark_async(
         reached_goal = False
         trial_start = time.perf_counter()
         trial_elapsed = 0.0
+        trial_completed = 0
         planner = _AsyncPlanner(controller, mj_model, mj_data)
 
         try:
@@ -748,14 +749,15 @@ def run_benchmark_async(
                     break
         finally:
             trial_elapsed = time.perf_counter() - trial_start
+            trial_completed = planner.stats.completed
             planner.drain(commit=False)
             if recorder is not None:
                 recorder.stop()
             planner.close()
 
         total_elapsed += trial_elapsed
-        total_completed += planner.stats.completed
-        trial_frequencies[trial_idx] = planner.stats.completed / max(
+        total_completed += trial_completed
+        trial_frequencies[trial_idx] = trial_completed / max(
             trial_elapsed,
             1e-9,
         )
